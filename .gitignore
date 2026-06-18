@@ -1,0 +1,13 @@
+### hugo ###
+public/
+.hugo_build.lock
+
+### IntelliJ IDEA ###
+.idea/
+
+### Mac OS ###
+.DS_Store
+
+### AI ###
+.claude
+CLAUDE.local.md
