@@ -6,15 +6,13 @@ paginate = 10
 
 [params]
   author = "Soonil Nagarkar"
-  description = "Staff Software Engineer"
+
+[params.assets]
+  favicon = "favicon.svg"
   ShowReadingTime = true
   ShowPostNavLinks = true
   ShowBreadCrumbs = false
   ShowCodeCopyButtons = true
-
-[params.homeInfoParams]
-  Title = "Soonil Nagarkar"
-  Content = "Staff software engineer with a decade of experience at Google, specializing in systems engineering and low-level performance work. Technical interests center on the intersection of algorithms and hardware reality — cache-aware data structure design, operating system internals, and performance-critical implementations where the gap between theoretical and practical efficiency actually matters."
 
 [[params.socialIcons]]
   name = "linkedin"

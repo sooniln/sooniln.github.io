@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"  width="16px" height="16px" viewBox="-3 0 12 12">
+    <path id="a" fill="none" stroke="white" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" d="M3 9V7L1 5V3L3 1 5 3V5L4 6"/>
+    <use xlink:href="#a" transform="rotate(180 3 6)"/>
+    <path id="b" fill="none" stroke="blue" stroke-width=".5" stroke-linejoin="round" stroke-linecap="round" d="M3 9V7L1 5V3L3 1 5 3V5L4 6"/>
+    <use xlink:href="#b" transform="rotate(180 3 6)"/>
+</svg>

@@ -1,0 +1,125 @@
+{{ $id := printf "bmchart-%d" .Ordinal }}
+{{ $benchmark := .Get "benchmark" }}
+{{ $order := .Get "order" }}
+{{ $title := .Get "title" | default (printf "%s — %s keys" $benchmark (.Get "order")) }}
+
+<div class="benchmark-chart-wrap">
+  <div class="benchmark-chart-toolbar">
+    <button id="{{ $id }}-yscale" class="benchmark-chart-btn active" title="Toggle y-axis scale">Linear Y-Axis</button>
+  </div>
+  <canvas id="{{ $id }}"></canvas>
+  <p class="benchmark-chart-hint">Scroll to zoom &middot; drag to pan &middot; double-click to reset</p>
+</div>
+
+<script>
+(function () {
+  var BENCHMARK = {{ $benchmark | jsonify | safeJS }};
+  var ORDER     = {{ $order     | jsonify | safeJS }};
+  var CHART_ID  = {{ $id        | jsonify | safeJS }};
+  var TITLE     = {{ $title     | jsonify | safeJS }};
+
+  var COLORS = [
+    '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
+    '#911eb4', '#42d4f4', '#f032e6', '#bfef45', '#fabed4'
+  ];
+
+  function fmtSize(n) {
+    n = Math.round(n);
+    if (n >= 1 << 20) return (n >>> 20) + 'M';
+    if (n >= 1 << 10) return (n >>> 10) + 'K';
+    return String(n);
+  }
+
+  function buildChart(csv) {
+    var lines = csv.split(/\r?\n/);
+    var h = lines[0].split(',');
+    var iB = h.indexOf('benchmark');
+    var iL = h.indexOf('library');
+    var iO = h.indexOf('order');
+    var iS = h.indexOf('size');
+    var iM = h.indexOf('median');
+
+    var iU = h.indexOf('unit');
+    var unit = '';
+    var byLib = {};
+    for (var i = 1; i < lines.length; i++) {
+      if (!lines[i]) continue;
+      var c = lines[i].split(',');
+      if (c[iB] !== BENCHMARK || c[iO] !== ORDER) continue;
+      if (!unit && iU >= 0) unit = c[iU];
+      var lib = c[iL];
+      var size = +c[iS];
+      var median = +c[iM];
+      if (!byLib[lib]) byLib[lib] = [];
+      byLib[lib].push({ x: Math.log2(size), y: median, _size: size });
+    }
+
+    var libs = Object.keys(byLib).sort();
+    var datasets = libs.map(function (lib, i) {
+      return {
+        label: lib,
+        data: byLib[lib].sort(function (a, b) { return a.x - b.x; }),
+        borderColor: COLORS[i % COLORS.length],
+        backgroundColor: 'transparent',
+        borderWidth: 2,
+        pointRadius: 2,
+        pointHoverRadius: 5,
+        tension: 0
+      };
+    });
+
+    var canvas = document.getElementById(CHART_ID);
+    var chart = new Chart(canvas, {
+      type: 'line',
+      data: { datasets: datasets },
+      options: {
+        responsive: true,
+        parsing: false,
+        plugins: {
+          title: { display: true, text: TITLE, font: { size: 14 } },
+          legend: { labels: { usePointStyle: true, pointStyle: 'line', pointStyleWidth: 20 } },
+          tooltip: {
+            callbacks: {
+              title: function (items) {
+                return items.length ? 'Size: ' + fmtSize(items[0].raw._size) : '';
+              },
+              label: function (ctx) {
+                return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + ' ' + unit;
+              }
+            }
+          },
+          zoom: {
+            zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'xy' },
+            pan:  { enabled: true, mode: 'xy' }
+          }
+        },
+        scales: {
+          x: {
+            type: 'linear',
+            title: { display: true, text: 'Map Size (entries)' },
+            ticks: {
+              stepSize: 1,
+              callback: function (v) { return fmtSize(Math.pow(2, v)); }
+            }
+          },
+          y: { type: 'logarithmic', title: { display: true, text: 'Median Time (' + unit + ')' } }
+        }
+      }
+    });
+
+    canvas.addEventListener('dblclick', function () { chart.resetZoom(); });
+
+    var btn = document.getElementById(CHART_ID + '-yscale');
+    btn.addEventListener('click', function () {
+      var isLog = chart.options.scales.y.type === 'logarithmic';
+      chart.options.scales.y.type = isLog ? 'linear' : 'logarithmic';
+      btn.textContent = isLog ? 'Logarithmic Y-Axis' : 'Linear Y-Axis';
+      btn.classList.toggle('active', !isLog);
+      chart.resetZoom();
+      chart.update();
+    });
+  }
+
+  fetch('/libraries.csv').then(function (r) { return r.text(); }).then(buildChart);
+}());
+</script>

@@ -1,9 +1,11 @@
 ---
 title: "Comprehensive JVM Primitive Hashtable Benchmarks 2026"
 date: 2026-06-18
-draft: true
+draft: false
 ShowToc: true
+TocOpen: true
 math: true
+charts: true
 ---
 
 ## Introduction
@@ -11,7 +13,7 @@ math: true
 Hashtables are one of the building blocks of computer science, and deservedly get a lot of attention - but less so
 within the JVM ecosystem. Part of this may simply be that most Java code is not written with performance top of mind,
 or that the default JRE implementation is all-around quite good - reasonably efficient, resistant against attacks, 
-etc... Today however, we'll be focusing entirely on performance.
+etc... I'm interested however in focusing entirely on performance today.
 
 For today, we're interested specifically in hashtables for primitive values. By focusing on values rather than
 references we'll entirely ignore the cost of heap allocation, pointer dereferencing, GC pressure, and also come up 
@@ -40,24 +42,27 @@ We'll benchmark and analyze the following libraries (links go to more detailed i
 
 You may note that several of the libraries benchmarked here are quite old and/or no longer maintained. The larger 
 purpose of this post is not to determine which is fastest (well - we all know that's a kinda cute lie), but to 
-investigate in detail the design choices that affect hashtable performance.
+investigate in detail the design choices that affect hashtable performance. Also note that the JRE is the only library
+here truly suited for external use (when an attacker can control the table) - most of these libraries have abandoned any
+pretense at resisting DoS attacks in favor of raw performance (both is rarely an option).
 
-Full benchmarking code used here is available at https://github.com/sooniln/jvm-collections-benchmarks.
+Full benchmarking code is available at https://github.com/sooniln/jvm-collections-benchmarks.
 
 ## Hashtable Design Choices
 
 Before we begin, it's worth starting with a quick refresher on how hash tables work, and the various design choices that
-have sprung up over the years.
+have sprung up over the years. If you're already reasonably familiar with how hashtables work, feel free to skip 
+straight to the [Libraries Under Test](#libraries-under-test) section, or the [Benchmark Setup](#benchmark-setup).
 
 Pretty much all general purpose hashtables operate by mapping a very large universe of potential keys onto a much
 smaller number of available slots (represented by in-memory data structure, almost always an array). As a trivial
-example, if we're using integers as keys, we would need to map all the ~4 billion possible integers onto the much
+example, if we're using 32-bit integers as keys, we would need to map all the ~4 billion possible integers onto the much
 smaller array in memory (for example a 128 slot array perhaps, if we're only expecting to map 100 integers total). This
-accomplished via [hash functions](https://en.wikipedia.org/wiki/Hash_function).
+is accomplished via [hash functions](https://en.wikipedia.org/wiki/Hash_function).
 
 Now by definition, once we've computed such a mapping there may be collisions - two different keys that are mapped 
-by a hash function to the same slot. The second responsibility of the hash table is this to handle hash collisions, and
-store multiple keys that map to the same slots somehow. This brings us to our first design decision,
+by a hash function to the same slot. The second responsibility of the hash table is thus to handle collisions, and
+store multiple keys that map to the same slots. This brings us to our first design decision,
 [open addressing](https://en.wikipedia.org/wiki/Open_addressing) vs
 [separate chaining](https://en.wikipedia.org/wiki/Hash_table#Separate_chaining).
 
@@ -65,46 +70,44 @@ store multiple keys that map to the same slots somehow. This brings us to our fi
 
 The first architectural fork in hashtable design is how collisions are handled when two keys map to the same slot.
 
-**Separate chaining** associates a separate collection of entries for each colliding key belonging to the same slot. 
-Hash collisions are thus naturally handled by the collection. The advantage here is simplicity - it's trivial to add 
-and remove things, and the selection of different collection types impacts performance. The most common collection 
-used here is a linked list, but other options are possible (the JRE HashMap starts with a linked list for example, but
-converts to a red-black tree if the list grows too large). The downside however is an additional indirection to 
-enter the collection, and the cost of lookup within the collection (using a linked list for example requires pointer 
-traversal and is very cache unfriendly).
+**Separate chaining** associates a separate collection of entries with each slot. All collections thus are stored 
+within the same collection. The advantage here is simplicity - it's trivial to add and remove things, and the selection
+of different collection types modifies performance. The most common collection used here is a linked list, but other
+options are possible (the JRE HashMap starts with a linked list for example, but converts to a red-black tree if the
+list grows too large). The downside is an additional indirection to enter the collection, and the cost of lookup within
+the collection (pointer traversal such as in a linked list is very cache unfriendly for example).
 
 **Open addressing** stores all entries directly in the contiguous backing array. When a slot is occupied, the algorithm
 probes for the next candidate slot according to some probing strategy (discussed in more detail below). Lookups and 
-insertions are often likely to stay nearby the original slot (cache friendly), which is why open addressing dominates 
-value hashtables (which don't have the built-in pointer dereference cost of references). Deletion in an open 
-addressed table however requires extra thought, and is discussed in more detail below.
+insertions are often likely to stay near the original slot (cache friendly), which is why open addressing dominates 
+value hashtables (which don't have the built-in pointer dereferencing cost of references). Deletion in an open 
+addressed table requires extra thought, and is discussed in more detail below.
 
-Every library in this benchmark except the JRE HashMap uses open addressing (since every library except the JRE HashMap
-is specialized for primitive keys).
+Every library in this benchmark except the JRE HashMap uses open addressing.
 
 ### Load Factor
 
 The [load factor](https://en.wikipedia.org/wiki/Hash_table#Load_factor) of a hashtable is the ratio of occupied 
 slots to total capacity. At load factor 0.5, half the backing array is empty. At 0.9, only one slot in ten is free.
 Most hashtables have a maximum load factor - when they reach that limit the backing array is expanded to reduce the
-load factor.
+load factor again. This provides a convenient upper bound on performance, and allows the hashtable to scale memory 
+usage with the number of entries.
 
 Higher load factors conserve memory but increase expected probe sequence length, which grows non-linearly as the table
-fills. For a uniformly random hash function and simple [linear probing](https://en.wikipedia.org/wiki/Linear_probing),
-expected probe length at load factor α is approximately:
+fills. For a uniformly random hash function and a simple linear probe, expected probe length at load factor α is
+approximately:
 
 * Successful lookup (hit) ≈ $\frac{1}{2}\left(1 + \frac{1}{1-\alpha}\right)$
 * Unsuccessful lookup (miss) ≈ $\frac{1}{2}\left(1 + \frac{1}{(1-\alpha)^2}\right)$
 
 At α=0.5 this means ~1.5 probes for hits and ~2.5 for misses. At α=0.75 that's ~2.5 probes for hits and ~8.5 for misses.
 And at α=0.9: ~5.5 for hits, ~50.5 for misses! This is a very simple calculation, assuming a perfect hash function and
-the simplest possible version of linear probing, but it is useful for understanding general probe length behavior and
-how important a good hash function is for linear probing.
+the simplest possible version of linear probing, but it is useful for understanding general probe length behavior.
 
 ### Backing Array Sizing
 
-Open-addressed hashtables need to decide how large of an array to use to hold some number of entries at a given load 
-factor. There are two main strategies.
+Open-addressed hashtables also need to decide how large of an array to use to hold some number of entries at a given 
+load factor. There are two main strategies.
 
 **Power-of-two sizing** uses table sizes that are always powers of two: 16, 32, 64, 128, and so on. This is primarily
 for performance reasons:
@@ -124,31 +127,32 @@ and can take 10-40+ cycles.
 
 **Prime sizing** keeps the table size as a prime number: 17, 37, 79, etc... Converting a hash to a slot now requires a
 modulo, and is thus slower. The case for prime sizing is that because the hash cannot have any hidden common factors
-with the prime table size (by definition), this results in a much more even spread of keys within the table with less
-clustering. Less clustering reduces average probe length, which reduces lookup times. There is one additional advantage
-to prime sizing - for non-linear probing schemes such as quadratic probing (discussed later) it is much easier to  
-ensure no infinite loops in probing (every slot will be visited by the probe before repeating).
+with the prime table size (by definition), this results in a much more even spread of keys within the table and thus 
+reduces clustering. Less clustering reduces average probe length, which reduces lookup times. There is one additional
+advantage to prime sizing - for non-linear probing schemes such as quadratic probing (discussed later) it is much 
+easier to ensure no infinite loops in probing (every slot will be visited by the probe before repeating).
 
-Trove is the only library in this benchmark using prime-sized tables. It also uses the identity hash for keys (no
-mixing/avalanching at all), so prime sizing is doing some real work there to ensure a reasonable spread.
+The simple implementations of both of these schemes requires a large re-allocation and complete rehash (re-insertion 
+of all elements) whenever the hashtable runs out of room. There are scenarios where this large "pause the world" 
+type of logic may be unacceptable, and so there are also
+[variations](https://en.wikipedia.org/wiki/Hash_table#Alternatives_to_all-at-once_rehashing) that allow for more 
+gradual resizing over time - usually at the expense of performance.
 
-All other libraries use power-of-two sizing with a hash mixing step to spread key bits before the AND operation. Mixing
-is discussed in greater detail further below.
+### Hashtable Memory Layout
 
-### Array Memory Layout
-
-Hashtables need to store both keys and value. There are two generally possible layouts:
+Hashtables need to store both keys and value. There are generally two simple for keys and values:
 
 **Parallel arrays** maintain one array for keys and a separate array for values:
-keys:   \[k0]\[k1]\[k2]\[k3]...
-values: \[v0]\[v1]\[v2]\[v3]...
+
+* keys:   \[k0]\[k1]\[k2]\[k3]...
+* values: \[v0]\[v1]\[v2]\[v3]...
 
 **Interleaved storage** packs key-value pairs together:
-table: \[k0]\[v0]\[k1]\[v1]\[k2]\[v2]\[k3]\[v3]...
 
-Note that interleaved storage is only reasonable when keys and values are the same size - expanding a smaller type to a
-larger one would waste space (and thus cache). It's not impossible strictly speaking, but generally just isn't worth 
-it.
+* table: \[k0]\[v0]\[k1]\[v1]\[k2]\[v2]\[k3]\[v3]...
+
+Note that interleaved storage can waste more space in order to achieve memory alignment if the keys and values are of
+different sizes.
 
 The advantage of separate arrays is that when a hashtable is probing through keys, more keys will fit in a single cache 
 line, resulting in less cache misses. However once you've located the correct key, you still need to load the value -
@@ -157,25 +161,24 @@ load the value. Using interleaved storage means that once you locate the key, th
 memory - no extra load necessary. But while probing, every cache line can now hold less keys, and thus more cache
 misses are incurred...
 
-As general rule we might hypothesize that separate arrays advantages lookups for keys that are not present, and
-interleaved storage advantages lookups for keys that are present (or with short probes). Of course the only way to 
-verify this is, you guessed it, benchmarking!
-
 #### Metadata
 
-There's one more wrinkle to add to the question of how to store data in memory - in addition to keys and values, some
-hashtables also store additional metadata for each entry. For example,
+Rather than storing keys/values directly in the primary hashtable arrays, there are other possibilities as well:
+
+For example,
 [Robin Hood](https://en.wikipedia.org/wiki/Robin_Hood_hashing) hashtables may store probe sequence lengths (PSLs - how 
 far a key is located from the slot it hashed too), and [Swiss tables](https://abseil.io/about/design/swisstables) store
-key fingerprints. Given that that metadata is usually substantially smaller than the key size, metadata cannot be
-interleaved with keys. If probing now requires accessing both metadata and keys this will incur many more cache misses,
-so when metadata is used probing will almost always attempt to only access metadata, and access keys only when
+key fingerprints. Given that that metadata is usually substantially smaller than the key size, metadata cannot easily
+be interleaved with keys. If probing now requires accessing both metadata and keys this will incur many more cache
+misses, so when metadata is used probing will almost always attempt to only access metadata, and access keys only when
 absolutely necessary.
 
-There is one more advantage to metadata - it can help with representing empty slots, which will be discussed in the
-next section.
+There are also hashtables that store indirect indices which point into separate key/value storage. This allows 
+key/value storage to be much denser than the main hashtable, potentially saving space, at the cost of an additional 
+level of indirection. 
 
-
+Finally, there is one more advantage to metadata - it can help with representing empty slots, which will be discussed 
+in the next section.
 
 | Library              | Storage Schema                                                                  |
 |----------------------|---------------------------------------------------------------------------------|
@@ -199,25 +202,22 @@ particular key value you might choose to represent "unoccupied" won't be inserte
 solutions to this.
 
 1. Enforce that the user provides an illegal key value which will always represent empty - the user can never insert
-   that key into the map.
+   that key into the map. Unworkable for any general purpose hashtable.
 2. Use a separate variable to track whether the empty key value has been added to the map and what its value is. In
-   every hashtable operation, check if the given key is the same as the empty key, and if so special-case the operation to
-   use the separate variable instead of looking in the table.
-3. Always allocate an array with 1 additional slot at the end, which is used to hold the empty key/value. Outside of
-   this one slot, the empty key means empty for the rest of the array.
-4. If the user attempts to insert the empty key, choose a new empty key at random which is not present in the table, and
-   update the table to use the new empty key before continuing the insertion.
-5. If using a metadata array, represent the empty slot in the metadata array. Now you don't need to care about the key
-   array representing empty slots at all.
+   every hashtable operation, check if the given key is the same as the empty key, and if so special-case the operation
+   to use the separate variable instead of looking in the table.
+3. Always allocate an array with 1 additional slot at the end, which is used to hold the value of the empty key. 
+   In the rest of the array, the empty key means an empty slot.
+4. If the user attempts to insert the empty key, choose a new empty key which is not present in the table, and update
+   the table to use the new empty key before continuing the insertion.
+5. If using a metadata array, represent the empty slot in the metadata array. 
 
-There are of course potential performance implications to all of these choices. If you need to add special cases to
-public APIs you'll add to code size - too large of a code block can prevent some JVM C2 compiler optimizations and 
-incur more code cache misses. If you need to check a member variable this is an additional load and register usage. Too
-much register usage can cause register spilling and commensurate performance impacts on the hot path. If you increase
-the array size by one, you may break C2 compiler knowledge about the range of your index variables, and prevent C2 from
-eliding array range checks on access... No matter the choice there's always a variety of consequences to think through,
-and pretty much no way to anticipate the impact except through a concept we haven't mentioned at all yet
-(benchmarking).
+There are of course potential performance implications to all of these choices. If you need to add special cases you'll
+add to code size - too large of a code block can prevent some JVM C2 compiler optimizations and also incur more code
+cache misses. If you need to check a member variable this is an additional load and register usage. Too much register
+usage can cause register spilling and commensurate performance impacts on the hot path. No matter the choice there's
+always a variety of consequences to think through, and pretty much no way to anticipate the impact except through a
+concept we haven't mentioned at all yet (benchmarking).
 
 ### Probing Strategies
 
@@ -228,49 +228,50 @@ the new entry to the collection of entries already associated with the slot, but
 When a slot is occupied, the table must find another. The sequence of slots tried in the search for an open slot is
 called the *probe sequence*, and its choice significantly impacts both throughput and cache behavior.
 
-The simplest choice is **Linear probing**, which just tries consecutive slots: slot, slot+1, slot+2, and so on (wrapping
-around the table) until an open slot is found. It is maximally cache-friendly (sequential memory access) — but suffers
-from *primary clustering*: once a run of occupied slots forms, any key that hashes into
-that run lengthens it, creating a feedback loop that lengthens the run further and degrades performance as entries are
-put into slots further and further away from their home slot, and thus requiring longer and longer probe sequences on
-lookup.
+**[Linear probing](https://en.wikipedia.org/wiki/Linear_probing)** just tries consecutive slots: slot, slot+1, slot+2, 
+and so on (wrapping around the table) until an open slot is found. It is maximally cache-friendly (sequential memory 
+access) — but suffers from *primary clustering*: once a run of occupied slots forms, any key that hashes into that run 
+lengthens it, creating a feedback loop that lengthens the run further and degrades performance as entries are put into 
+slots further and further away from their home slot, and thus requiring longer and longer probe sequences on lookup.
 
 ```
-State: [][][A][B][C][][]
+State: [ ][ ][A][B][C][ ][ ]
 
 Insert D (hashes to slot 2): probe 2→3→4→5, insert at 5.
-State: [][][A][B][C][D][]
+State: [ ][ ][A][B][C][D][ ]
 
-Insert E (hashes to slot 5): probe 5→6, insert at 6. Cluster grew.
-State: [][][A][B][C][D][E]
+Insert E (hashes to slot 5): probe 5→6, insert at 6. Cluster continues to grow...
+State: [ ][ ][A][B][C][D][E]
 ```
 
 **[Quadratic probing](https://en.wikipedia.org/wiki/Quadratic_probing)** uses offsets slot+0², slot+1², slot+2², slot+3²... (the probe number squared). It avoids 
-primary
-clustering but can instead produce secondary clustering (keys with the same initial slot follow identical probe
-sequences) and over long probe sequences results in more cache misses than linear probing.
+primary clustering but can instead produce secondary clustering (keys with the same initial slot follow identical probe
+sequences) and over longer probe sequences results in more cache misses than linear probing.
 
-**Double hashing** uses a second hash function to calculate the step size based on the key: slot, slot+step,
-slot+2\*step, slot+3\*step, etc. It avoids both primary and secondary clustering - the cost is computing two hash
-functions and the non-sequential memory access pattern.
+**[Double hashing](https://en.wikipedia.org/wiki/Double_hashing)** uses a second hash function to calculate the step
+size based on the key: slot, slot+step, slot+2\*step, slot+3\*step, etc. It avoids both primary and secondary 
+clustering - the cost is computing two hash functions and the non-sequential memory access pattern which also 
+results in additional cache misses.
 
-**Robin Hood hashing** is a refinement of linear probing that swaps entry positions (swapping a "poorer" \[further from
-it's home slot\] entry with a "richer" \[closer to it's home slot\] entry - hence Robin Hood...) during insertion to
-reduce probe length variance. Entries that were "lucky" and landed near their ideal slot yield their position to
-"unlucky" entries that have traveled further. This equalizes probe lengths and allows higher load factors without the
-worst-case blow-up of plain linear probing.
+**[Robin Hood hashing](https://en.wikipedia.org/wiki/Hash_table#Robin_Hood_hashing)** is a refinement of linear probing
+that swaps entry positions (swapping a "poorer" \[further from it's home slot\] entry with a "richer" \[closer to 
+it's home slot\] entry - hence Robin Hood) during insertion to reduce probe length variance. Entries that are "rich" 
+and landed near their ideal slot yield their position to "poor" entries that have traveled further. This equalizes 
+probe lengths and allows much higher load factors without the worst-case blow-up of plain linear probing (Robin Hood 
+hashtables are often run at load factors of .9 without much performance impact).
 
 And finally of course, you can have arbitrarily complex combinations of any probing scheme. A table could linear probe
-for the first N elements, then switch to quadratic probing, or linear probing with a different hash function, etc... The
-advantage to more complex probing schemes is that you can attempt to equalize the various pros and cons of each. For
-example, by starting with linear probing you can take advantage of its cache friendly behavior initially - linear
-probing for a cache line distance to avoid extra cache misses - then switch to quadratic probing when you're going to
-incur a cache miss anyway.
+for the first N elements, then switch to quadratic probing, or switch to linear probing with a different hash function, 
+etc... The advantage to more complex probing schemes is that you can attempt to equalize the various pros and cons 
+of each. For example, by starting with linear probing you can take advantage of its cache friendly behavior 
+initially - linear probing for a cache line distance to avoid extra cache misses - then switch to quadratic probing 
+when you're going to incur a cache miss anyway. The downside of these arbitrarily complex combinations is of course 
+code complexity - but also entry removal, which can become very difficult.
 
 | Library              | Probing Strategy                                                                   |
 |----------------------|------------------------------------------------------------------------------------|
 | JRE                  | Separate chaining (linked list -> red black tree)                                  |
-| FastCollect          | Robin Hood + Combination (linear probing on hash1 -> linear probing on hash2)      |
+| FastCollect          | Robin Hood                                                                         |
 | Fastutil             | Linear probing                                                                     |
 | AndroidX             | Quadratic probing (each probe checks a group of 8 linear entries)                  |
 | Trove                | Double hashing                                                                     |
@@ -280,63 +281,56 @@ incur a cache miss anyway.
 | Agrona               | Linear probing                                                                     |
 | PrimitiveCollections | Linear probing                                                                     |
 
-### Tombstones vs. Backward-Shift Deletion
+### Entry Removal
 
-Deleting a key from an open-addressed map is more complex than insertion. Simply
-clearing the slot would leave a gap in a probe sequence, causing lookups for later
-keys to terminate early at the gap and incorrectly report "key not found".
+Now that we've walked through the process of adding entries to the hashtable, how do we remove entries? Deleting a key 
+from an open-addressed map is more complex than insertion. We can't simply find the slot in the array and clear 
+it - this would break the invariants various probing algorithms rely on to function. Clearing the slot would 
+leave a gap in a probe sequence, causing lookups for later keys to terminate early at the gap and incorrectly report 
+a key as not present in the table.
 
-The standard solution is a **tombstone**: rather than clearing the slot, mark it with
-a DELETED sentinel. Future lookups probe past tombstones. Future insertions can reuse
-them. Most libraries in this benchmark use tombstones, including fastutil, Eclipse
-Collections, HPPC, Agrona, and PrimitiveCollections.
+One standard solution is **[lazy deletion](https://en.wikipedia.org/wiki/Lazy_deletion)**: rather than clearing the 
+slot, mark it with a special DELETED value (called a tombstone). Future lookups probe past tombstones, and future 
+insertions can reuse them. Tombstones are very easy to implement, but can accumulate over time. A map with many 
+insertions and deletions will fill up with tombstones, which probe sequences must scan through even though they
+represent no data. This degrades all operations over time. Most implementations address this by triggering a rehash 
+when tombstones exceed some fraction of capacity, but this means delete-heavy workloads periodically pay a 
+full-table rehash cost.
 
-The problem with tombstones is accumulation. A map with many insertions and deletions
-will fill up with tombstones, which probe sequences must scan through even though they
-represent no data. This degrades all operations over time. Most implementations
-address this by triggering a rehash when tombstones exceed some fraction of capacity,
-but this means delete-heavy workloads periodically pay a full-table rehash cost.
-After deleting A and B:
+**Backward-shift deletion** is an alternative that avoids tombstones entirely. After clearing a slot, the algorithm 
+looks at the next slot and checks if its occupant could shift back one position (i.e., its probe distance is greater
+than zero — it's not at its ideal slot). If so, it shifts back. This continues until an empty slot or a slot whose 
+occupant is already at its ideal position is reached.
 
-[][][D][C][_][T][T]     (T = tombstone)
-
-Lookup for E (hashes to slot 0): probe 0,1,2,3,4,5,6 — must scan tombstones
-
-**Backward-shift deletion** (also called back-shift or Robin Hood deletion) avoids
-tombstones entirely. After clearing a slot, the algorithm looks at the next slot and
-checks if its occupant could shift back one position (i.e., its probe distance is
-greater than zero — it's not at its ideal slot). If so, it shifts back. This
-continues until an empty slot or a slot whose occupant is already at its ideal
-position is reached.
-Before: [][A(d=0)][B(d=1)][C(d=2)][]   (d = displacement from ideal)
+```
+Before (d = displacement from ideal):
+[      ][A(d=0)][B(d=1)][C(d=2)][      ]   
 
 Delete A:
+[      ][      ][B(d=1)][C(d=2)][      ]
 
-[][][B(d=1)][C(d=2)][]
+Shift B back (d=1, shift allowed):
+[      ][B(d=0)][      ][C(d=2)][      ]
 
-Shift B back (d=1, can move):
+Shift C back (d=2, shift allowed):
+[      ][B(d=0)][C(d=1)][      ][      ]
+```
 
-[][B(d=0)][][C(d=2)][]
+The result is a table with no tombstones and no gaps — every probe sequence remains contiguous. Lookup and insertion
+performance doesn't degrade after heavy deletion. The cost is that deletion is slightly more expensive, and that
+(1) element displacement must be linear (2) an element's displacement must be calculable. Robin Hood hashing tends to 
+maintain this naturally, so backwards shift deletion is commonly used with Robin Hood hashing, but it is 
+possible with other variations as well.
 
-Shift C back (d=2, can move):
+### Hash Functions And Mixing: Avalanche and Bias
 
-[][B(d=0)][C(d=1)][][_]
+So far we've discussed the simple mechanics of how a hashtable works, but avoided thinking too much about the hash 
+function (often assuming a "perfect" hash function). Real life may have problems with these assumptions. Let's start 
+with, what does it even mean to be a perfect hash function?
 
-The result is a table with no tombstones and no gaps — every probe sequence remains
-contiguous. Lookup and insertion performance doesn't degrade after heavy deletion.
-The cost is that deletion is slightly more expensive (the shift work), and backward-
-shift deletion requires that entries know their displacement, which Robin Hood hashing
-naturally maintains.
-
-FastCollect uses backward-shift deletion, consistent with its Robin Hood probing
-strategy. The Swiss Table design used by AndroidX uses a different approach: the
-metadata byte for a deleted slot is set to a DELETED marker (0b11111110), and a
-"drop deletes without full rehash" pass reclaims them by rehashing in place —
-avoiding tombstone accumulation without requiring backward shifting.
-
-### Hash Function Choice: Avalanche and Bias
-
-For a primitive integer map, the key itself is an integer. A naive implementation
+For a 
+primitive integer map, the key itself is an 
+integer. A naive implementation
 uses that integer directly as the hash. This is what Trove does for `int` keys:
 
 ```java
@@ -448,49 +442,6 @@ probing.
 degradation under adversarial or clustered key distributions. For uniformly random
 keys, all mixing functions produce similar collision rates. The benchmark uses both
 sequential and random key distributions to surface this difference.
-
----
-
-
-
-
-## Benchmark Infrastructure
-
-* No CPU pinning, ran on idle machine.
-* 6 Core AMD Ryzen 5 9600X - Windows 11
-
-Benchmarks were run until standard deviation to mean ratios were at a reasonable level (where possible - there were a
-few benchmarks that still did not converge nicely after a reasonable number of re-runs), then median was used to 
-score in order to avoid outliers.
-
-Two types of maps tested:
-
-Integer → Integer
-* Allows interleaved key/value layouts.
-* Likely the most common type of primitive map.
-
-Long → Integer
-* Keys and values are of different size, interleaved layouts are unlikely to be useful.
-* Key is of maximum primitive size (cannot be widened to accommodate metadata).
-* Larger key size increases cache pressure.
-
-For benchmarking, the load factor of every library was adjusted to a minimum of .75 for comparison (except for Eclipse,
-which does not support this):
-
-| Library              | Default | Benchmarked | Adjustable |
-|----------------------|---------|-------------|------------|
-| JRE                  | 0.75    | 0.75        | Yes        |
-| FastCollect          | 0.9     | 0.9         | No         |
-| Fastutil             | 0.75    | 0.75        | Yes        |
-| AndroidX             | 0.875   | 0.875       | No         |
-| Trove                | 0.5     | 0.75        | Yes        |
-| Koloboke             | 0.667   | 0.75        | Yes        |
-| Eclipse              | 0.50    | 0.50        | No         |
-| HPPC                 | 0.75    | 0.75        | Yes        |
-| Agrona               | n/a     | 0.75        | Yes        |
-| PrimitiveCollections | 0.75    | 0.75        | Yes        |
-
-Ten libraries were benchmarked. Versions are pinned as listed; the full benchmark code is available for independent reproduction.
 
 ## Libraries Under Test
 
@@ -785,3 +736,264 @@ return h ^ (h >>> 16);
 int h = (int)(key ^ (key >>> 32)) * INT_PHI;
 return h ^ (h >>> 16);
 ```
+
+## Benchmark Setup
+
+* No CPU pinning, ran on idle machine.
+* 6 Core AMD Ryzen 5 9600X - Windows 11
+
+Benchmarks were run until standard deviation to mean ratios were at a reasonable level (where possible - there were a
+few benchmarks that still did not converge nicely after a reasonable number of re-runs), then median was used to
+score in order to avoid outliers.
+
+Two types of maps tested:
+
+Integer → Integer
+* Same size for keys/values allows for interleaved memory layouts without penalty.
+* Smaller key/value sizes implies cheaper movement of entries.
+* Smaller keys pack more into cache.
+
+Long → Integer
+* Different size for keys/values prevents interleaved layouts.
+* Larger keys increase cache pressure and take longer to move.
+
+The hashtables under test come with a variety of different default load factors. We face a choice of whether to try and
+force similar load factors for a more apples-to-apples comparison, or use the default load factors which may 
+unfairly advantage some implementations. Load factors have become an important part of hashtable design - it's a 
+valid choice to use a low load factor for performance for example, and recover memory in other ways (by ensuring the 
+load factor only affects the smaller metadata array and packing keys/value tightly outside the main array for 
+example). As such, we do not change the default load factors chosen for each library (except Agrona - since it has no
+default we benchmark at 75% load factor).
+
+### Key Selection and Ordering
+
+Because hash functions have such a large effect on the performance of hash tables, it's important to test with data 
+that can represent real world scenarios. We specify 3 key orders to test under:
+
+* **random**: Keys are selected at random from the entire universe of possible keys. This represents scenarios where
+  only a subset of keys are stored - for example if a hashtable is being used as a cache.
+* **lowBits**: Keys are selected from 0 → table size and shuffled randomly. This has the effect that only the least 
+  significant bits of the key tend to be set, and most significant bits are all zero. This represents scenarios where 
+  almost the entire key set is stored.
+* **highBits**: The same as lowBits, but every key is bit-reversed, so that the most significant bits tend to be set,
+  and the least significant are all zero. This represents two scenarios - (1) an easy adversarial attack (since the 
+  vast majority of hashtables are power-of-two sized, we know that they will usually truncate high bits in order to 
+  calculate a slot - without good bit-mixing properties these tables may be vulnerable) (2) structures that have been 
+  bit-packed into keys and thus have unusually structured bits (for example, a Point class can trivially be encoded as 
+  a 64 bit value).
+
+In practice, I suspect (with no evidence other than gut feeling) that random and lowBits are likely to represent the 
+majority of real world scenarios in the JVM ecosystem.
+
+### Benchmark Selection
+
+We benchmark the following operations:
+
+* **getHit**: The cost of looking up a value for a key present in the hashtable. Note that since different 
+  hashtables have different conventions for representing keys that are not present (some of which may give that 
+  hashtable an unfair advantage), we use getOrDefault() or equivalent APIs for a fair comparison.
+* **getMiss**: The cost of looking up a value for a key not present in the hashtable. Note that since different
+  hashtables have different conventions for representing keys that are not present (some of which may give that
+  hashtable an unfair advantage), we use getOrDefault() or equivalent APIs for a fair comparison.
+* **putHit**: The cost of changing the value for a key present in the hashtable. When offered, this will always use 
+  an API which does not return a value in order to find the cheapest possible cost.
+* **putMiss**: The cost of assigning a value to a key not present in the hashtable. When offered, this will always use
+  an API which does not return a value in order to find the cheapest possible cost.
+* **removeAndPutMiss**: The cost of removing a key and then assigning a value to a different key that is not present in
+  the table. The setup of JMH tests makes it difficult to accurately quantify the cost of just a remove operation - 
+  this is a compromise.
+* **forEach**: The cost of iterating over every key/value present in the hashtable using the fastest iteration 
+  technique exposed by the hashtable.
+* **naiveCopy**: The cost of copying the hashtable starting from empty and inserting elements until complete - 
+  with no information given on the total number of elements to be expected, so no pre-allocation can be done.
+* **preAllocatedCopy**: The cost of copying the hashtable directly as cheaply as possible (may just be a memcpy in the
+  cheapest case).
+
+| Library              | Default | Benchmarked | Adjustable |
+|----------------------|---------|-------------|------------|
+| JRE                  | 0.75    | 0.75        | Yes        |
+| FastCollect          | 0.9     | 0.9         | No         |
+| Fastutil             | 0.75    | 0.75        | Yes        |
+| AndroidX             | 0.875   | 0.875       | No         |
+| Trove                | 0.5     | 0.75        | Yes        |
+| Koloboke             | 0.667   | 0.75        | Yes        |
+| Eclipse              | 0.50    | 0.50        | No         |
+| HPPC                 | 0.75    | 0.75        | Yes        |
+| Agrona               | n/a     | 0.75        | Yes        |
+| PrimitiveCollections | 0.75    | 0.75        | Yes        |
+
+## Benchmark Results
+
+Raw benchmark results can be downloaded [here](/libraries.csv).
+
+While viewing graphs, you may use the button to switch the time axis between log scale and linear scale. Clicking on 
+a library in the legend will hide/show the data for that library.
+
+### Overall Results
+
+Rather than forcing you to scroll past the excessive graphs and numbers below which go into individual scenarios, 
+might as well cut to the chase, right?
+
+### Int → Int
+
+We start with the results of benchmarking Int → Int hashtables.
+
+#### Int → Int / getHit
+
+{{< benchmark-chart benchmark="IntMap.getHit" order="random" title="Int → Int / getHit — random keys" >}}
+
+As this is the first graph we're looking at, note the distinct regime changes as the hashtable size increases past 
+L1 and L2 cache size. For many of the power-of-two sized graphs we see the distinct sawtooth performance that comes 
+from different load factors as the table is queried when more empty vs more full. The JRE boxed HashMap is on the 
+slower side but remains reasonably competitive. Eclipse performs well with its maximum 50% load factor, though at 
+the cost of almost double the memory usage in some cases.
+
+{{< benchmark-chart benchmark="IntMap.getHit" order="lowBits" title="Int → Int / getHit — lowBits keys" >}}
+
+Trove performs dramatically better on lowBits keys than on random keys. Recall that Trove uses the identity hash 
+function and prime-sized tables - for lowBits keys the identity hash is pretty much a perfect hash function, which 
+explains its excellent performance.
+
+{{< benchmark-chart benchmark="IntMap.getHit" order="highBits" title="Int → Int / getHit — highBits keys" >}}
+
+AndroidX was performing on the slower side, but still reasonably for random and lowBits keys - however it completely 
+falls apart on highBits keys, especially at smaller sizes. ~1500 ns to find any key in a 4k sized table is very odd 
+and troubling. Recall that AndroidX uses the low 7 bits as the fingerprint - it's likely that the fingerprint is 
+falsely matching at a much higher rate than 1/128 and forcing a check of almost every entry. This indicates poor 
+hash mixing, and it seems likely AndroidX worst case performance could be improved with a stronger mixing function.
+
+The more classic linear probing implementations (Fastutil, HPPC, PrimitiveCollections) also see performance 
+degradation, but interestingly performance improves dramatically until at 32K entries before falling off again.
+
+Agrona comes ahead as a winner in part to the extra mixing its hash function achieves.
+
+#### Int → Int / getMiss
+
+{{< benchmark-chart benchmark="IntMap.getMiss" order="random" title="Int → Int / getMiss — random keys" >}}
+
+Eclipse (thanks to its 50% load factor) and AndroidX dominate getMiss performance. This is exactly what we'd expect 
+from AndroidX as well - getMiss means the entire probe chain must be scanned before giving up, and AndroidX can scan 
+long chains quicker than any other implementation thanks to its small (and thus easy to keep in cache) metadata 
+array and SWAR techniques to scan 8 slots at a time. Note also however the performance falling of a cliff at 32M+ 
+entries (benchmarks at larger sizes timed out completely). I'm unsure exactly what causes this, though I wonder if it's 
+related to the metadata array no longer fitting in L3 cache + AndroidX using cache unfriendly geometric probing?
+
+{{< benchmark-chart benchmark="IntMap.getMiss" order="lowBits" title="Int → Int / getMiss — lowBits keys" >}}
+
+As we've learned to expect, Trove is more competitive with lowBits keys.
+
+{{< benchmark-chart benchmark="IntMap.getMiss" order="highBits" title="Int → Int / getMiss — highBits keys" >}}
+
+AndroidX again is particularly vulnerable against highBits keys, and still has the performance cliff at 32M+. 
+Fastutil, HPPC and PrimitiveCollections all show the exact same odd spike in performance at ~95K elements - I am at 
+a loss as to what might be causing that.
+
+One interesting thing to note is I believe (though I have not confirmed) that we can see the effect of the JRE 
+fallback to red-black trees instead of linked lists for storage - note how JRE performance recovers at ~10M elements.
+
+#### Int → Int / putHit
+
+{{< benchmark-chart benchmark="IntMap.putHit" order="random" title="Int → Int / putHit — random keys" >}}
+
+Our "usual suspects" for linear probing implementations appears to be more competitive with Eclipse for put 
+operations rather than get operations. Otherwise, nothing to shocking here, though JRE performance does appear to 
+fall off a cliff at large sizes...
+
+{{< benchmark-chart benchmark="IntMap.putHit" order="lowBits" title="Int → Int / putHit — lowBits keys" >}}
+
+As before, Trove continues to perform better for lowBits keys. Nothing too shocking otherwise.
+
+{{< benchmark-chart benchmark="IntMap.putHit" order="highBits" title="Int → Int / putHit — highBits keys" >}}
+
+As before, several hashtables are flummoxed by highBits keys, and Agrona and Eclipse seem to have the most stable 
+performance.
+
+#### Int → Int / putMiss
+
+{{< benchmark-chart benchmark="IntMap.putMiss" order="random" title="Int → Int / putMiss — random keys" >}}
+
+As in the putHit benchmark, the linear probing implementations remain competitive with Eclipse. I am surprised 
+AndroidX didn't perform better - as putMiss should require scanning to the end of a probe chain (which AndroidX is 
+exceptionally fast at), but perhaps the additional write overhead in AndroidX as it twiddles bits is offsetting this?
+
+{{< benchmark-chart benchmark="IntMap.putMiss" order="lowBits" title="Int → Int / putMiss — lowBits keys" >}}
+
+Not much new to observe here.
+
+{{< benchmark-chart benchmark="IntMap.putMiss" order="highBits" title="Int → Int / putMiss — highBits keys" >}}
+
+Nor here - same patterns we observed previously persist.
+
+#### Int → Int / removeAndPutMiss
+
+{{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="random" title="Int → Int / removeAndPutMiss — random keys" >}}
+
+Almost all the implementations demonstrate a more pronounced sawtooth here, as they become more sensitive to the exact
+load factor. The JRE HashMap performs quite well, beating most other unboxed implementations, including Eclipse, 
+until it gets to ~512K elements. AndroidX performance falls off a cliff with large numbers of elements, and this 
+does not appear to be related to the keys at all, since this performance cliff is visible for both lowBits and 
+highBits removeAndPutMiss benchmarks as well.
+
+{{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="lowBits" title="Int → Int / removeAndPutMiss — lowBits keys" >}}
+
+Overall not much change for lowBits benchmarks vs random - do note however that Trove has *not* improved relative 
+to random, as we saw for all the get/put benchmarks...
+
+{{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="highBits" title="Int → Int / removeAndPutMiss — highBits keys" >}}
+
+Largely the same patterns we've seen before here.
+
+#### Int → Int / forEach
+
+{{< benchmark-chart benchmark="IntMap.forEach" title="Int → Int / forEach" >}}
+
+The time it takes to iterate over a hashtable is heavily influenced by the cost of skipping empty entries.
+
+#### Int → Int / naiveCopy + preAllocatedCopy
+
+{{< benchmark-chart benchmark="IntMap.naiveCopy" title="Int → Int / naiveCopy" >}}
+{{< benchmark-chart benchmark="IntMap.preAllocatedCopy" title="Int → Int / preAllocatedCopy" >}}
+
+### Long → Int
+
+Now the results of benchmarking Long → Int hashtables. Note that since Agrona does not support Long → Int tables, it 
+is being benchmarked with a Long → Long table.
+
+#### Long → Int / getHit
+
+{{< benchmark-chart benchmark="LongMap.getHit" order="random" title="Long → Int / getHit — random keys" >}}
+{{< benchmark-chart benchmark="LongMap.getHit" order="lowBits" title="Long → Int / getHit — lowBits keys" >}}
+{{< benchmark-chart benchmark="LongMap.getHit" order="highBits" title="Long → Int / getHit — highBits keys" >}}
+
+#### Long → Int / getMiss
+
+{{< benchmark-chart benchmark="LongMap.getMiss" order="random" title="Long → Int / getMiss — random keys" >}}
+{{< benchmark-chart benchmark="LongMap.getMiss" order="lowBits" title="Long → Int / getMiss — lowBits keys" >}}
+{{< benchmark-chart benchmark="LongMap.getMiss" order="highBits" title="Long → Int / getMiss — highBits keys" >}}
+
+#### Long → Int / putHit
+
+{{< benchmark-chart benchmark="LongMap.putHit" order="random" title="Long → Int / putHit — random keys" >}}
+{{< benchmark-chart benchmark="LongMap.putHit" order="lowBits" title="Long → Int / putHit — lowBits keys" >}}
+{{< benchmark-chart benchmark="LongMap.putHit" order="highBits" title="Long → Int / putHit — highBits keys" >}}
+
+#### Long → Int / putMiss
+
+{{< benchmark-chart benchmark="LongMap.putMiss" order="random" title="Long → Int / putMiss — random keys" >}}
+{{< benchmark-chart benchmark="LongMap.putMiss" order="lowBits" title="Long → Int / putMiss — lowBits keys" >}}
+{{< benchmark-chart benchmark="LongMap.putMiss" order="highBits" title="Long → Int / putMiss — highBits keys" >}}
+
+#### Long → Int / removeAndPutMiss
+
+{{< benchmark-chart benchmark="LongMap.removeAndPutMiss" order="random" title="Long → Int / removeAndPutMiss — random keys" >}}
+{{< benchmark-chart benchmark="LongMap.removeAndPutMiss" order="lowBits" title="Long → Int / removeAndPutMiss — lowBits keys" >}}
+{{< benchmark-chart benchmark="LongMap.removeAndPutMiss" order="highBits" title="Long → Int / removeAndPutMiss — highBits keys" >}}
+
+#### Long → Int / forEach
+
+{{< benchmark-chart benchmark="LongMap.forEach" title="Long → Int / forEach" >}}
+
+#### Long → Int / naiveCopy + preAllocatedCopy
+
+{{< benchmark-chart benchmark="LongMap.naiveCopy" title="Long → Int / naiveCopy" >}}
+{{< benchmark-chart benchmark="LongMap.preAllocatedCopy" title="Long → Int / preAllocatedCopy" >}}
