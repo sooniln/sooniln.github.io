@@ -22,7 +22,7 @@ with an analysis that will hopefully continue to hold weight with upcoming
 
 Hashtables that store values rather than references can provide a range of large performance benefits within the JVM,
 such as no boxing, no pointer indirection, better cache locality, etc... The JVM ecosystem has accumulated a handful of
-libraries that address this by providing maps backed by primitive arrays. The problem is that the performance 
+libraries that address this by providing hashtables backed by primitive arrays. The problem is that the performance 
 tradeoffs and design choices between them are neither obvious nor well-documented anywhere. Many different choices 
 are made around hash functions, collision resolution strategies, load factors, and those choices produce
 meaningfully different performance profiles.
@@ -180,19 +180,6 @@ level of indirection.
 Finally, there is one more advantage to metadata - it can help with representing empty slots, which will be discussed 
 in the next section.
 
-| Library              | Storage Schema                                                                  |
-|----------------------|---------------------------------------------------------------------------------|
-| JRE                  | Node pointers with boxed keys/values (can form a linked list or red-black tree) |
-| FastCollect          | Metadata + Interleaved if key/value size matches, Parallel otherwise            |
-| Fastutil             | Parallel                                                                        |
-| AndroidX             | Metadata + Parallel                                                             |
-| Trove                | Metadata + Parallel                                                             |
-| Koloboke             | Interleaved if key/value size matches, Parallel otherwise                       |
-| Eclipse              | Parallel                                                                        |
-| HPPC                 | Parallel                                                                        |
-| Agrona               | Parallel                                                                        |
-| PrimitiveCollections | Parallel                                                                        |
-
 ### Empty Slots
 
 We've discussed key arrays, value arrays, interleaved key/value arrays, and separate metadata arrays. No matter which
@@ -244,12 +231,13 @@ Insert E (hashes to slot 5): probe 5→6, insert at 6. Cluster continues to grow
 State: [ ][ ][A][B][C][D][E]
 ```
 
-**[Quadratic probing](https://en.wikipedia.org/wiki/Quadratic_probing)** uses offsets slot+0², slot+1², slot+2², slot+3²... (the probe number squared). It avoids 
-primary clustering but can instead produce secondary clustering (keys with the same initial slot follow identical probe
-sequences) and over longer probe sequences results in more cache misses than linear probing.
+**[Quadratic probing](https://en.wikipedia.org/wiki/Quadratic_probing)** uses offsets slot+0², slot+1², slot+2²,  
+slot+3²... (the probe number squared). It avoids primary clustering but can instead produce secondary clustering 
+(keys with the same initial slot follow identical probe sequences) and over longer probe sequences results in more 
+cache misses than linear probing.
 
-**[Double hashing](https://en.wikipedia.org/wiki/Double_hashing)** uses a second hash function to calculate the step
-size based on the key: slot, slot+step, slot+2\*step, slot+3\*step, etc. It avoids both primary and secondary 
+**[Double hashing](https://en.wikipedia.org/wiki/Double_hashing)** uses a second hash function to calculate the stride
+size based on the key: slot, slot+stride, slot+2\*stride, slot+3\*stride, etc. It avoids both primary and secondary 
 clustering - the cost is computing two hash functions and the non-sequential memory access pattern which also 
 results in additional cache misses.
 
@@ -267,19 +255,6 @@ of each. For example, by starting with linear probing you can take advantage of 
 initially - linear probing for a cache line distance to avoid extra cache misses - then switch to quadratic probing 
 when you're going to incur a cache miss anyway. The downside of these arbitrarily complex combinations is of course 
 code complexity - but also entry removal, which can become very difficult.
-
-| Library              | Probing Strategy                                                                   |
-|----------------------|------------------------------------------------------------------------------------|
-| JRE                  | Separate chaining (linked list -> red black tree)                                  |
-| FastCollect          | Robin Hood                                                                         |
-| Fastutil             | Linear probing                                                                     |
-| AndroidX             | Quadratic probing (each probe checks a group of 8 linear entries)                  |
-| Trove                | Double hashing                                                                     |
-| Koloboke             | Linear probing                                                                     |
-| Eclipse              | Combination (linear probing on hash1 -> linear probing on hash2 -> double hashing) |
-| HPPC                 | Linear probing                                                                     |
-| Agrona               | Linear probing                                                                     |
-| PrimitiveCollections | Linear probing                                                                     |
 
 ### Entry Removal
 
@@ -349,7 +324,7 @@ eliminated). For power-of-two tables where indexing is `hash & (n-1)`, this mean
 the lower bits of the hash must be well-mixed.
 
 The most common approach in this benchmark family is **[Fibonacci/phi multiplicative
-hashing](https://en.wikipedia.org/wiki/Hash_function#Fibonacci_hashing)** followed by an xorshift:
+hashing](https://en.wikipedia.org/wiki/Hash_function#Fibonacci_hashing)** followed by a xor shift:
 
 ```java
 // fastutil HashCommon.mix(), Koloboke, HPPC BitMixer.mixPhi(), Speiger HashUtil.mix()
@@ -443,298 +418,300 @@ degradation under adversarial or clustered key distributions. For uniformly rand
 keys, all mixing functions produce similar collision rates. The benchmark uses both
 sequential and random key distributions to surface this difference.
 
+#### Knuth Multiplicative Hashing
+
 ## Libraries Under Test
+
+
+
+| Library              | Storage Schema                                                                  |
+|----------------------|---------------------------------------------------------------------------------|
+| JRE                  | Node pointers with boxed keys/values (can form a linked list or red-black tree) |
+| FastCollect          | Metadata + Interleaved if key/value size matches, Parallel otherwise            |
+| Fastutil             | Parallel                                                                        |
+| AndroidX             | Metadata + Parallel                                                             |
+| Trove                | Metadata + Parallel                                                             |
+| Koloboke             | Interleaved if key/value size matches, Parallel otherwise                       |
+| Eclipse              | Parallel                                                                        |
+| HPPC                 | Parallel                                                                        |
+| Agrona               | Parallel                                                                        |
+| PrimitiveCollections | Parallel                                                                        |
+
+| Library              | Probing Strategy                                                                   |
+|----------------------|------------------------------------------------------------------------------------|
+| JRE                  |                                   |
+| FastCollect          | Robin Hood                                                                         |
+| Fastutil             | Linear probing                                                                     |
+| AndroidX             | Quadratic probing (each probe checks a group of 8 linear entries)                  |
+| Trove                | Double hashing                                                                     |
+| Koloboke             | Linear probing                                                                     |
+| Eclipse              | Combination (linear probing on hash1 -> linear probing on hash2 -> double hashing) |
+| HPPC                 | Linear probing                                                                     |
+| Agrona               | Linear probing                                                                     |
+| PrimitiveCollections | Linear probing                                                                     |
 
 ### JRE
 
-Java's standard library map uses separate chaining: each bucket holds a linked list that is automatically promoted to a
-red-black tree once it grows too large, bounding worst-case lookup from O(n) to O(log n) per bucket under adversarial
-key distributions. All keys are stored as boxed `Integer` or `Long` objects on the heap; every primitive key thus incurs
-an allocation and a pointer indirection on access. Capacity is always a power of two; the default load factor is 0.75,
-adjustable via the constructor.
+Java's standard library hashtable uses separate chaining: each bucket holds a linked list that is automatically 
+promoted to a red-black tree once it grows too large, bounding worst-case lookup from O(n) to O(log n) per bucket 
+under adversarial key distributions. All keys are stored as boxed `Integer` or `Long` objects on the heap; every 
+primitive key thus incurs an allocation and a pointer indirection on access.
 
-The hash finalizer performs minimal mixing, relying on the red-black tree fallback behavior to prevent pathological
-lookups.
+* **Storage Schema**: Power-of-two sized, array of node pointers holding boxed keys/values (can form a linked list or 
+  red-black tree)
+* **Probing Strategy**: Separate chaining (linked list/red-black tree)
+* **Deletion Strategy**: Removal from linked list/red-black tree
+* **Default Load Factor**: 75%
 
-```java
-// int key
-return key ^ (key >>> 16);
+**Integer key hash finalizer**: The hash finalizer performs minimal mixing, relying on the red-black tree fallback 
+behavior to prevent pathological lookups.
 
-// long key
-int h = (int)(key ^ (key >>> 32));
-return h ^ (h >>> 16);
 ```
-
----
+key ^ (key >>> 16);
+```
 
 ### FastCollect
 
-*Disclosure: this post's author wrote FastCollect. See the introduction for full details.*
+*Disclosure: I am the author of FastCollect.*
 
-FastCollect is a Kotlin Multiplatform primitive collections library supporting JVM, JS, and native targets. Its maps use Robin Hood open addressing — an open addressing scheme that reduces lookup variance by keeping probe distances tightly balanced. On insertion, an incoming entry that has traveled farther from its ideal slot than the current occupant steals that slot. The `Int2IntHashMap` packs each key-value pair as a single `long` in one flat `LongArray` (key in the low 32 bits, value in the high 32 bits), halving the array count relative to separate key/value arrays and maximizing spatial locality. Tables use power-of-two capacity. The load factor is 0.9 for large tables and 1.0 for small tables up to two cache lines; it is not user-configurable. Tombstones are eliminated via backward-shifting on removal.
+FastCollect is a Kotlin Multiplatform primitive collections library supporting JVM, JS, and native targets.
 
 **Source:** [sooniln/fastcollect](https://github.com/sooniln/fastcollect)  
-**Maven:** `io.github.sooniln:fastcollect-kotlin-jvm:2.0.0` *(development pre-release built from local source; latest published release: 1.0.1)*  
-**Last release:** v1.0.1 — May 14, 2026
+**Maven:** `io.github.sooniln:fastcollect-kotlin-jvm:2.0.0`
+**Last release:** June 2026
 
-```kotlin
-// int map: two-round XOR-shift/multiply
-var h = key xor (key ushr 16)
-h = h * 0x9E3779B9.toInt()
-h = h xor (h ushr 16)
+* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
+* **Probing Strategy**: Linear Probing (Robin Hood)
+* **Removal Strategy**: Backwards shift deletion
+* **Default Load Factor**: 90% (100% for very small tables)
 
-// long: XOR-fold to int, then same rotation scheme as int set
-val h = (key xor (key ushr 32)).toInt()
-// (key * 0x93d765dd).rotateLeft(log2Size) applied to h
+**Integer key hash finalizer**: FastCollect makes a bet that keys will tend to either fall within the hashtable size 
+bound, or outside of it, and that the branch in the finalizer can thus be easily predicted. If this assumption is 
+not true, performance will suffer (revisited later in the benchmarking section). When the key is not within the size 
+bound uses Knuth multiplicative hashing with constant shift and pre-mixing step.
+
 ```
-
----
+if (key < size) {
+    return key
+} else {
+    var h = key ^ (key >>> 16)
+    h *= 0x9E3779B9 // PHI
+    return h ^ (h >>> 16)
+}
+```
 
 ### Fastutil
 
-The most comprehensive and widely-adopted JVM primitive collections library. `Int2IntOpenHashMap` and
-`Long2IntOpenHashMap` use open addressing with linear probing, power-of-two capacity, and a default load factor of 0.75,
-adjustable via the constructor. Keys and values are stored in separate flat `int[]` / `long[]` arrays.
+One of the most comprehensive and widely-adopted JVM primitive collections libraries, Fastutil is very well known.
 
 **Source:** [vigna/fastutil](https://github.com/vigna/fastutil)  
 **Maven:** `it.unimi.dsi:fastutil:8.5.18`  
-**Last release:** ~October 2025
+**Last release:** October 2025
 
-The hash finalizer multiplies by the golden ratio constant PHI (from Knuth multiplicative hashing), but simply folds
-high bits down into low bits for suboptimal mixing.
+* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
+* **Probing Strategy**: Linear Probing
+* **Removal Strategy**: Backwards shift deletion
+* **Default Load Factor**: 75%
 
-```java
-// int key
-static final int INT_PHI = 0x9E3779B9;
-int h = x * INT_PHI;
-return h ^ (h >>> 16);
+**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
 
-// long key
-static final long LONG_PHI = 0x9E3779B97F4A7C15L;
-long h = x * LONG_PHI;
-h ^= h >>> 32;
-return h ^ (h >>> 16);
 ```
-
----
-
-### Eclipse
-
-Originally the Goldman Sachs Collections library, donated to the Eclipse Foundation in 2012. Eclipse maps use open
-addressing with a three-phase probing strategy, power-of-two capacity, and an unchangeable load factor of .50. Key-value
-pairs are stored interleaved if possible, and in separate arrays otherwise. For the three-phase probing strategy, phase
-1 probes linearly for half a cache line based on hash 1; phase 2 probes linearly for half a cache line based on hash 2;
-phase 3 falls back to double hashing.
-
-Note: Eclipse forces a load factor of .50 - much lower than any other library in this benchmark and which cannot be
-adjusted. Since this cannot be compared well to other libraries (which default to .75+), it is elided from graphs,
-though it's raw benchmarking data is included (it is usually the fastest). Some experimentation with running other
-libraries with a .50 load factor indicates they are competitive and may out-perform Eclipse, but true benchmarking has
-not been performed.
-
-**Source:** [eclipse/eclipse-collections](https://github.com/eclipse/eclipse-collections)  
-**Website:** [eclipse.dev/collections](https://eclipse.dev/collections/)  
-**Maven:** `org.eclipse.collections:eclipse-collections:13.0.0`  
-**Last release:** December 24, 2024
-
-The hash finalizer used here may be related to SipHash - not entirely clear where the constants come from.
-
-```java
-// int key — intSpreadOne (intSpreadTwo uses different constants)
-code ^= code >>> 15;
-code *= 0xACAB2A4D;
-code ^= code >>> 15;
-code *= 0x5CC7DF53;
-code ^= code >>> 12;
-
-// long key — longSpreadOne (longSpreadTwo uses different constants)
-code ^= code >>> 28;
-code *= -4254747342703917655L;  // 0xC4C882C7C77BA2C9L
-code ^= code >>> 43;
-code *= -908430792394475837L;   // 0xF36A08AC0D05E0C3L
-code ^= code >>> 23;
+var h = key * 0x9E3779B9 // PHI
+return h ^ (h >>> 16)
 ```
-
----
 
 ### AndroidX
 
 Google's Jetpack collection utilities library, now written in Kotlin and available as a Kotlin Multiplatform artifact.
-`IntIntMap` and `LongIntMap` adopt a Swiss Table design. A separate array stores 1 byte of metadata per slot, organized
-into groups of 8 (8 bytes = 1 long), and probes traverse this metadata array before entering separate key and value
-arrays. The probe sequence is quadratic over groups, with power-of-two-aligned capacity; the load factor is locked at
-.875.
-
-For each byte of metadata, the low 7 bits store a per-slot fingerprint (H2) and the remaining bit encodes empty/deleted
-state. Lookups consume metadata 8 entries at a time using SWAR (SIMD Within A Register) techniques, checking all eight
-fingerprints in parallel before touching any key slot — dramatically reducing cache misses on a lookup miss. The top 25
-bits of the hash (H1) drive the group probe offset; the low 7 bits (H2) serve as the fingerprint.
-
-Note: AndroidX libraries are primarily intended for arm64, though they are distributed as multi-platform. Since
-benchmarks were run on amd64, care should be taken not to generalize the results.
+The implementation is a Swiss Table design that uses SWAR (SIMD within a register) techniques to evaluate groups
+of 8 entries at a time. AndroidX libraries are primarily intended for arm64, though they are distributed as 
+multi-platform. Since benchmarks were run on amd64, care should be taken not to generalize the results.
 
 **Source:** [android.googlesource.com](https://android.googlesource.com/platform/frameworks/support) ([GitHub mirror](https://github.com/androidx/androidx))  
 **Website:** [developer.android.com/jetpack/androidx/releases/collection](https://developer.android.com/jetpack/androidx/releases/collection)  
 **Maven:** `androidx.collection:collection-jvm:1.6.0`  
-**Last release:** March 11, 2026
+**Last release:** March 2026
 
-```java
-// int key: MurmurHash3 C1 multiply, spread low bits upward into high bits
-val MurmurHashC1 = 0xcc9e2d51
-int h = key * MurmurHashC1
-return h ^ (h << 16)
+* **Storage Schema**: Power-of-two sized, metadata array of 1 byte/entry, parallel arrays for keys/values
+  * **Metadata Schema**: Stores low 7 bits of original hash as the metadata fingerprint, the high 25 bits are used to
+    drive the probe offset
+* **Probing Strategy**: Quadratic Probing (where each probe checks a group of 8 linear entries)
+* **Removal Strategy**: Tombstones + rehash to remove tombstones at ~78% capacity
+* **Default Load Factor**: 87.5%
 
-// long key: XOR-fold to int, then same multiply-and-spread
-int h = (key ^ (key >>> 32)).toInt() * MurmurHashC1
+**Integer key hash finalizer**: Murmur3 finalizer. Note that the left shift instead of right shift would seem to
+concentrate hash entropy further in the upper bits. Keys with no entropy in the low bits we would expect to hurt
+performance (and indeed, benchmarking results confirm this).
+
+```
+var h = key * 0xCC9E2D51 // MurmurHashC1
 return h ^ (h << 16)
 ```
-
-Let's quickly break down the Swiss table approach to metadata to see what this looks like. Swiss tables maintain a
-separate **metadata array** — one byte per slot — that encodes slot state:
-
-- 0b10000000: empty
-- 0b11111110: deleted (tombstone)
-- 0b0xxxxxxx: occupied, where the 7 bits `xxxxxxx` are the low 7 bits of the hash (the *fingerprint*)
-
-Probing then works by scanning the metadata array rather than the key array and matching against the low 7 bits of the
-hash. False positives on the fingerprint are possible, but unlikely, and it's only in the case of a fingerprint match
-that it is necessary to check the key to fully confirm the match. In addition, because metadata bytes are small, 64
-bytes (one cache line) covers 64 slots. With [SIMD](https://en.wikipedia.org/wiki/Single_instruction,_multiple_data) or SWAR (SIMD Within A Register) techniques, many metadata bytes can
-be checked for a matching fingerprint simultaneously - much faster than iterating through them all one at a time. The
-much cheaper cost of checking metadata also means that Swiss tables can tolerate much higher load factors without a
-large performance impact.
-
----
 
 ### Trove
 
 GNU Trove uses open addressing with double hashing: rather than a fixed linear step, each key computes a secondary
 probe stride from its primary hash, so colliding keys scatter along independent paths and form shorter clusters than
-linear probing would. Table capacity is always a prime number, ensuring the secondary stride is coprime to the table
-size and that every slot is reachable. A separate byte array tracks each slot's state (FREE, FULL, or REMOVED). The
-default load factor is 0.75, adjustable via the constructor.
+linear probing would.
 
 **Source:** [bitbucket.org/trove4j/trove](https://bitbucket.org/trove4j/trove)
-**Maven:** `net.sf.trove4j:core:3.1.0`  
-**Last release:** August 3, 2018 (due to module split - no active development since ~2012 apparently)
+**Maven:** `net.sf.trove4j:core:3.1.0`
+**Last release:** August 2018 (due to module split - no active development since ~2012 apparently)
 
-The hash function for int keys is the identity — no bit mixing is applied; distribution quality relies entirely on the
-double-hashing probe to counteract clustering. For long keys, the upper and lower 32-bit halves are XOR-folded to
-produce a 32-bit hash.
+* **Storage Schema**: Prime sized, metadata array to track slot empty state + parallel arrays for keys/values
+    * **Metadata Schema**: Only tracks empty state, which means every probe step has to check both metadata array and
+      key arrays - would expect this to hurt performance.
+* **Probing Strategy**: Double hashing
+* **Removal Strategy**: Tombstones, rehash if there are no free slots (only tombstones) left, also rehash if removal 
+  allows backing array to shrink to the previous prime size
+* **Default Load Factor**: 75%
 
-```java
-// int key: identity — no mixing
-return value;
+**Integer key hash finalizer**: The identity hash — no bit mixing is applied; distribution quality relies entirely on
+the double-hashing probe and prime sized arrays to counteract clustering.
 
-// long key: XOR-fold upper and lower halves
-return (int)(value ^ (value >>> 32));
 ```
+// double hashing
+// slot - identity hash
+return key
 
----
+// stride
+return 1 + (key % (length - 2))
+```
 
 ### Koloboke
 
-Koloboke maps use open addressing with linear probing, power-of-two capacity, backwards-shift deletions, and a default load factor of 0.75 (user
-configurable). Key-value pairs are stored interleaved if possible, and in separate arrays otherwise.
+A high performance collections library from Roman Leventov, appears to have been designed with HFT in mind. Makes use
+Unsafe APIs for performance.
 
-**Source:** [leventov/Koloboke](https://github.com/leventov/Koloboke) (archived)  
-**Maven:** `com.koloboke:koloboke-impl-jdk8:1.0.0`  
-**Last release:** May 26, 2016
+**Source:** [leventov/Koloboke](https://github.com/leventov/Koloboke)
+**Maven:** `com.koloboke:koloboke-impl-jdk8:1.0.0`
+**Last release:** May 2016
 
-The hash function is a Fibonacci-constant multiplicative mix
-using the golden-ratio constants for 32-bit and 64-bit respectively, consistent with fastutil and HPPC.
+* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards shift deletion
+* **Default Load Factor**: 75%
 
-```java
-// int key
-int h = key * 0x9E3779B9;
-return h ^ (h >>> 16);
+**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
 
-// long key (inferred from template structure — generated source not confirmed)
-long h = key * 0x9E3779B97F4A7C15L;
-return (int)(h ^ (h >>> 32));
+```
+var h = x * 0x9E3779B9 // PHI
+return h ^ (h >>> 16)
 ```
 
----
+### Eclipse
+
+Originally the Goldman Sachs Collections library, donated to the Eclipse Foundation in 2012. Eclipse forces a load 
+factor of 50% - much lower than any other library in this benchmark and which cannot be adjusted. Beware assuming 
+an apples to apples comparison. Some experimentation with running other libraries with a 50% load factor indicates 
+they are competitive and may out-perform Eclipse, but full benchmarking has not been performed.
+
+**Source:** [eclipse/eclipse-collections](https://github.com/eclipse/eclipse-collections)  
+**Website:** [eclipse.dev/collections](https://eclipse.dev/collections/)  
+**Maven:** `org.eclipse.collections:eclipse-collections:13.0.0`
+**Last release:** December 24, 2024
+
+* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
+* **Probing Strategy**: Combination (linear probing on hash1 for half a cache line -> linear probing on hash2 for 
+  half a cache line -> double hashing)
+* **Removal Strategy**: Tombstones - tombstones count towards rehashing load factor
+* **Default Load Factor**: 50%
+
+**Integer key hash finalizer**: 3 separate hash finalizers for the various probing steps. It's not entirely clear where 
+the constants come from.
+
+```
+// hash1 - identity hash
+return key
+
+// hash2 - murmur3 style finalizer
+var h = key ^ (key >>> 14)
+h *= 0xBA1CCD33
+h ^= h >>> 13
+h *= 0x9B6296CB
+return h ^ (h >>> 12)
+
+// double hashing
+// slot
+var h = key ^ (key >>> 15)
+h *= 0xACAB2A4D
+h ^= h >>> 15
+h *= 0x5CC7DF53
+return h ^ (h >>> 12)
+
+// stride - odd stride ensures every slot is hit with power-of-two sized array
+return Integer.reverse(hash2(key)) | 1
+```
 
 ### HPPC
 
-High Performance Primitive Collections, maintained by Carrot Search. Maps use open addressing with linear probing,
-power-of-two capacity, and a default load factor of 0.75, adjustable via the constructor. Keys and values are stored in separate flat arrays. Deletion
-uses backward-shifting to avoid tombstones. Iteration uses a randomized starting offset (seeded per-instance) to prevent
+High Performance Primitive Collections, maintained by Carrot Search. Iteration uses a randomized starting offset (seeded per-instance) to prevent
 consistent worst-case traversal patterns. The `mixPhi(long)` variant XOR-folds its result to `int` directly, unlike fastutil's `mix(long)` which preserves the full 64-bit result.
 
 **Source:** [carrotsearch/hppc](https://github.com/carrotsearch/hppc)  
 **Website:** [labs.carrotsearch.com/hppc.html](https://labs.carrotsearch.com/hppc.html)  
 **Maven:** `com.carrotsearch:hppc:0.10.0`  
-**Last release:** June 4, 2024
+**Last release:** June 2024
 
-```java
-// int key (BitMixer.mixPhi(int))
-static final int PHI_C32 = 0x9e3779b9;
-int h = k * PHI_C32;
-return h ^ (h >>> 16);
+* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards shift deletion
+* **Default Load Factor**: 75%
 
-// long key (BitMixer.mixPhi(long)) — XOR-folds result to int
-static final long PHI_C64 = 0x9e3779b97f4a7c15L;
-long h = k * PHI_C64;
-return (int)(h ^ (h >>> 32));
+**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
+
 ```
-
----
+var h = key * 0x9E3779B9 // PHI
+return h ^ (h >>> 16)
+```
 
 ### Agrona
 
 Agrona is Real Logic's utility library, developed primarily to support the [Aeron](https://github.com/aeron-io/aeron)
-messaging system. Primitive maps use open addressing with linear probing, power-of-two capacity, and a default load factor of 0.65, adjustable via the constructor (alongside the required missing-value sentinel). Key-value pairs are stored interleaved. Uses
-backward-shift deletion on removal rather than tombstones. Every map must have an unrepresentable value passed in on
-initialization (to mark empty slots), so Agrona can never represent maps with the full range of integers/longs. Note:
-the long-key benchmark uses `Long2LongHashMap` (Agrona provides no `Long2IntHashMap`); values are widened to `long` at
-the benchmark wrapper level.
+messaging system. Agrona enforces every map must have an unrepresentable value passed in on initialization (to mark 
+empty slots), thus Agrona is incapable of representing the full range of values.
 
-Note: For benchmarking purposes, Agrona maps were initialized with a load factor of .75 rather than the default of .65.
+Note: Since Agrona does not have a Long → Int map, benchmarking uses Long → Long maps instead, and widens values. Be 
+wary of apples to apples comparisons.
 
 **Source:** [aeron-io/agrona](https://github.com/aeron-io/agrona)  
 **Maven:** `org.agrona:agrona:2.4.1`  
-**Last release:** April 29, 2026
+**Last release:** April 2026
 
-```java
-// int key (Hashing.hash(int)) — two-round XOR-shift/multiply (Thomas Wang)
-int x = value;
-x = ((x >>> 16) ^ x) * 0x119de1f3;
-x = ((x >>> 16) ^ x) * 0x119de1f3;
-x = (x >>> 16) ^ x;
-return x;
+* **Storage Schema**: Power-of-two sized, interleaved arrays for keys/values (Agrona does not support key and values 
+  with different sizes)
+* **Probing Strategy**: Linear Probing
+* **Removal Strategy**: Backwards shift deletion
+* **Default Load Factor**: 65%
 
-// long key (Hashing.hash(long)) — three-round with distinct constants (David Stafford)
-long x = value;
-x = (x ^ (x >>> 30)) * 0xbf58476d1ce4e5b9L;
-x = (x ^ (x >>> 27)) * 0x94d049bb133111ebL;
-x = x ^ (x >>> 31);
-return (int)x ^ (int)(x >>> 32);
+**Integer key hash finalizer**: Two-round XOR-shift/multiply from Chris Wellons' Hash Prospector.
+
 ```
-
----
+var h = key ^ (key >>> 16)
+h = h * 0x119DE1f3
+h = h ^ (h >>> 16)
+h = h * 0x119DE1f3
+return h ^ (h >>> 16)
+```
 
 ### Primitive Collections
 
-Speiger's `Primitive-Collections` is a library explicitly aimed at duplicating and outperforming fastutil.
-`Int2IntOpenHashMap` and `Long2IntOpenHashMap` use open addressing with linear probing, power-of-two capacity, and a
-default load factor of 0.75, adjustable via the constructor. Keys and values are stored in separate flat arrays.
+PrimitiveCollections is a library explicitly aimed at duplicating and outperforming fastutil.
 
 **Source:** [Speiger/Primitive-Collections](https://github.com/Speiger/Primitive-Collections)  
 **Maven:** `io.github.speiger:Primitive-Collections:1.0.0`  
-**Last release:** May 15, 2026
+**Last release:** May 2026
 
-```java
-// int key (HashUtil.mix(int))
-static final int INT_PHI = 0x9E3779B9;
-int h = x * INT_PHI;
-return h ^ (h >>> 16);
+* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
+* **Probing Strategy**: Linear Probing
+* **Removal Strategy**: Backwards shift deletion
+* **Default Load Factor**: 75%
 
-// long key: XOR-fold via Long.hashCode(), then apply int mix
-// HashUtil.mix(Long.hashCode(key))
-int h = (int)(key ^ (key >>> 32)) * INT_PHI;
-return h ^ (h >>> 16);
+**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
+
+```
+var h = key * 0x9E3779B9 // PHI
+return h ^ (h >>> 16)
 ```
 
 ## Benchmark Setup
@@ -750,20 +727,32 @@ Two types of maps tested:
 
 Integer → Integer
 * Same size for keys/values allows for interleaved memory layouts without penalty.
-* Smaller key/value sizes implies cheaper movement of entries.
 * Smaller keys pack more into cache.
 
 Long → Integer
 * Different size for keys/values prevents interleaved layouts.
-* Larger keys increase cache pressure and take longer to move.
+* Larger keys increase cache pressure.
 
 The hashtables under test come with a variety of different default load factors. We face a choice of whether to try and
 force similar load factors for a more apples-to-apples comparison, or use the default load factors which may 
 unfairly advantage some implementations. Load factors have become an important part of hashtable design - it's a 
-valid choice to use a low load factor for performance for example, and recover memory in other ways (by ensuring the 
-load factor only affects the smaller metadata array and packing keys/value tightly outside the main array for 
-example). As such, we do not change the default load factors chosen for each library (except Agrona - since it has no
-default we benchmark at 75% load factor).
+valid choice to use a low load factor for performance and recover memory in other ways (by ensuring the load factor
+only affects the smaller metadata array and packing keys/value tightly outside the main array for example). However, 
+none of the hashtables benchmarked here appear to be applying any such memory optimizations, and in the interest of 
+similar comparisons we try to enforce that every hashtable has a load factor of at least 75%.
+
+| Library              | Default | Benchmarked | Adjustable |
+|----------------------|---------|-------------|------------|
+| JRE                  | 75%     | 75%         | Yes        |
+| FastCollect          | 90%     | 90%         | No         |
+| Fastutil             | 75%     | 75%         | Yes        |
+| AndroidX             | 87.5%   | 87.5%       | No         |
+| Trove                | 50%     | 75%         | Yes        |
+| Koloboke             | 66.7%   | 75%         | Yes        |
+| **Eclipse**          | 50%     | **50%**     | No         |
+| HPPC                 | 75%     | 75%         | Yes        |
+| Agrona               | n/a     | 75%         | Yes        |
+| PrimitiveCollections | 75%     | 75%         | Yes        |
 
 ### Key Selection and Ordering
 
@@ -809,18 +798,11 @@ We benchmark the following operations:
 * **preAllocatedCopy**: The cost of copying the hashtable directly as cheaply as possible (may just be a memcpy in the
   cheapest case).
 
-| Library              | Default | Benchmarked | Adjustable |
-|----------------------|---------|-------------|------------|
-| JRE                  | 0.75    | 0.75        | Yes        |
-| FastCollect          | 0.9     | 0.9         | No         |
-| Fastutil             | 0.75    | 0.75        | Yes        |
-| AndroidX             | 0.875   | 0.875       | No         |
-| Trove                | 0.5     | 0.75        | Yes        |
-| Koloboke             | 0.667   | 0.75        | Yes        |
-| Eclipse              | 0.50    | 0.50        | No         |
-| HPPC                 | 0.75    | 0.75        | Yes        |
-| Agrona               | n/a     | 0.75        | Yes        |
-| PrimitiveCollections | 0.75    | 0.75        | Yes        |
+### Major Caveats **PLEASE READ**
+
+standard micros benchmark caveats
+
+no benchmarking of tombstones
 
 ## Benchmark Results
 
@@ -833,6 +815,10 @@ a library in the legend will hide/show the data for that library.
 
 Rather than forcing you to scroll past the excessive graphs and numbers below which go into individual scenarios, 
 might as well cut to the chase, right?
+
+### FastCollect Branch Prediction
+
+### 50% Load Factor
 
 ### Int → Int
 
