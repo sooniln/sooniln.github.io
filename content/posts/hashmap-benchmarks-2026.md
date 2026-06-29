@@ -30,7 +30,7 @@ meaningfully different performance profiles.
 We'll benchmark and analyze the following libraries (links go to more detailed information lower down this page):
 
 * [JRE](#jre)
-* [FastCollect](#fastcollect) (disclaimer: I am the author of FastCollect)
+* [FastCollect](#fastcollect) (I am the author of FastCollect)
 * [Fastutil](#fastutil)
 * [Eclipse](#eclipse)
 * [AndroidX](#androidx)
@@ -55,13 +55,13 @@ have sprung up over the years. If you're already reasonably familiar with how ha
 straight to the [Libraries Under Test](#libraries-under-test) section, or the [Benchmark Setup](#benchmark-setup).
 
 Pretty much all general purpose hashtables operate by mapping a very large universe of potential keys onto a much
-smaller number of available slots (represented by in-memory data structure, almost always an array). As a trivial
+smaller number of available slots (represented by an in-memory data structure, almost always an array). As a trivial
 example, if we're using 32-bit integers as keys, we would need to map all the ~4 billion possible integers onto the much
 smaller array in memory (for example a 128 slot array perhaps, if we're only expecting to map 100 integers total). This
 is accomplished via [hash functions](https://en.wikipedia.org/wiki/Hash_function).
 
 Now by definition, once we've computed such a mapping there may be collisions - two different keys that are mapped 
-by a hash function to the same slot. The second responsibility of the hash table is thus to handle collisions, and
+by a hash function to the same slot. The second responsibility of the hashtable is thus to handle collisions, and
 store multiple keys that map to the same slots. This brings us to our first design decision,
 [open addressing](https://en.wikipedia.org/wiki/Open_addressing) vs
 [separate chaining](https://en.wikipedia.org/wiki/Hash_table#Separate_chaining).
@@ -70,18 +70,18 @@ store multiple keys that map to the same slots. This brings us to our first desi
 
 The first architectural fork in hashtable design is how collisions are handled when two keys map to the same slot.
 
-**Separate chaining** associates a separate collection of entries with each slot. All collections thus are stored 
+**Separate chaining** associates a separate collection of entries with each slot. All colliding entries thus are stored 
 within the same collection. The advantage here is simplicity - it's trivial to add and remove things, and the selection
 of different collection types modifies performance. The most common collection used here is a linked list, but other
 options are possible (the JRE HashMap starts with a linked list for example, but converts to a red-black tree if the
 list grows too large). The downside is an additional indirection to enter the collection, and the cost of lookup within
-the collection (pointer traversal such as in a linked list is very cache unfriendly for example).
+the collection (pointer traversal such as in a linked list is very cache-unfriendly for example).
 
 **Open addressing** stores all entries directly in the contiguous backing array. When a slot is occupied, the algorithm
 probes for the next candidate slot according to some probing strategy (discussed in more detail below). Lookups and 
-insertions are often likely to stay near the original slot (cache friendly), which is why open addressing dominates 
-value hashtables (which don't have the built-in pointer dereferencing cost of references). Deletion in an open 
-addressed table requires extra thought, and is discussed in more detail below.
+insertions are likely to stay near the original slot (cache-friendly), which is why open addressing dominates value 
+hashtables (which don't have the built-in pointer dereferencing cost of references). Deletion in an open-addressed 
+table requires extra thought, and is discussed in more detail below.
 
 Every library in this benchmark except the JRE HashMap uses open addressing.
 
@@ -100,9 +100,10 @@ approximately:
 * Successful lookup (hit) ≈ $\frac{1}{2}\left(1 + \frac{1}{1-\alpha}\right)$
 * Unsuccessful lookup (miss) ≈ $\frac{1}{2}\left(1 + \frac{1}{(1-\alpha)^2}\right)$
 
-At α=0.5 this means ~1.5 probes for hits and ~2.5 for misses. At α=0.75 that's ~2.5 probes for hits and ~8.5 for misses.
-And at α=0.9: ~5.5 for hits, ~50.5 for misses! This is a very simple calculation, assuming a perfect hash function and
-the simplest possible version of linear probing, but it is useful for understanding general probe length behavior.
+At α=0.5, this means ~1.5 probes for hits and ~2.5 for misses. At α=0.75 that's ~2.5 probes for hits and ~8.5 for 
+misses. And at α=0.9: ~5.5 for hits, ~50.5 for misses! This is a very simple calculation, assuming a perfect hash 
+function and the simplest possible version of linear probing, but it is useful for understanding general probe 
+length behavior.
 
 ### Backing Array Sizing
 
@@ -129,18 +130,20 @@ and can take 10-40+ cycles.
 modulo, and is thus slower. The case for prime sizing is that because the hash cannot have any hidden common factors
 with the prime table size (by definition), this results in a much more even spread of keys within the table and thus 
 reduces clustering. Less clustering reduces average probe length, which reduces lookup times. There is one additional
-advantage to prime sizing - for non-linear probing schemes such as quadratic probing (discussed later) it is much 
+advantage to prime sizing - for non-linear probing schemes such as quadratic probing (discussed later), it is much 
 easier to ensure no infinite loops in probing (every slot will be visited by the probe before repeating).
 
-The simple implementations of both of these schemes requires a large re-allocation and complete rehash (re-insertion 
+The simple implementations of both of these schemes require a large re-allocation and complete rehash (re-insertion 
 of all elements) whenever the hashtable runs out of room. There are scenarios where this large "pause the world" 
 type of logic may be unacceptable, and so there are also
 [variations](https://en.wikipedia.org/wiki/Hash_table#Alternatives_to_all-at-once_rehashing) that allow for more 
-gradual resizing over time - usually at the expense of performance.
+gradual resizing over time - usually at the expense of performance. All hashtables benchmarked here do complete rehashes
+on running out of space (some allow for tombstone-removal-only rehashes in the event that they use tombstones - 
+covered later).
 
 ### Hashtable Memory Layout
 
-Hashtables need to store both keys and value. There are generally two simple for keys and values:
+Hashtables need to store both keys and values. There are generally two simple memory layouts for keys and values:
 
 **Parallel arrays** maintain one array for keys and a separate array for values:
 
@@ -158,24 +161,26 @@ The advantage of separate arrays is that when a hashtable is probing through key
 line, resulting in less cache misses. However once you've located the correct key, you still need to load the value -
 with separate arrays the value is located somewhere else entirely, and you're incurring another possible cache miss to
 load the value. Using interleaved storage means that once you locate the key, the value is immediately adjacent in
-memory - no extra load necessary. But while probing, every cache line can now hold less keys, and thus more cache
-misses are incurred...
+memory - no extra load necessary. But while probing, every cache line can now hold fewer keys, and thus more cache
+misses are incurred. Which layout is faster comes down to how much probing is required to find a key or ensure it is 
+not present, and how many caches misses probing produces.
 
 #### Metadata
 
 Rather than storing keys/values directly in the primary hashtable arrays, there are other possibilities as well:
 
-For example,
-[Robin Hood](https://en.wikipedia.org/wiki/Robin_Hood_hashing) hashtables may store probe sequence lengths (PSLs - how 
-far a key is located from the slot it hashed too), and [Swiss tables](https://abseil.io/about/design/swisstables) store
-key fingerprints. Given that that metadata is usually substantially smaller than the key size, metadata cannot easily
-be interleaved with keys. If probing now requires accessing both metadata and keys this will incur many more cache
-misses, so when metadata is used probing will almost always attempt to only access metadata, and access keys only when
-absolutely necessary.
+For example, [Robin Hood](https://en.wikipedia.org/wiki/Robin_Hood_hashing) hashtables may store probe sequence 
+lengths (PSLs - how far a key is located from the slot it hashed to), and
+[Swiss tables](https://abseil.io/about/design/swisstables) store key fingerprints. Given that the metadata is 
+usually substantially smaller than the key size, metadata cannot easily be interleaved with keys. If probing now 
+requires accessing both metadata and keys this will incur many more cache misses, so when metadata is used probing 
+will almost always attempt to only access metadata (which is what makes key fingerprints so useful), and access keys 
+only when absolutely necessary.
 
 There are also hashtables that store indirect indices which point into separate key/value storage. This allows 
 key/value storage to be much denser than the main hashtable, potentially saving space, at the cost of an additional 
-level of indirection. 
+level of indirection. This might allow a hashtable to use a load factor of 50% or lower, knowing that it will only 
+apply to a small metadata table, while keys/values are packed tightly.
 
 Finally, there is one more advantage to metadata - it can help with representing empty slots, which will be discussed 
 in the next section.
@@ -183,8 +188,8 @@ in the next section.
 ### Empty Slots
 
 We've discussed key arrays, value arrays, interleaved key/value arrays, and separate metadata arrays. No matter which
-is used however, a hashtable needs some way to indicate an empty slot, so that it know where it can insert new 
-entries or when it can stop probing during a lookup. The problem of course, is that there is no guarantee any  
+is used however, a hashtable needs some way to indicate an empty slot, so that it knows where it can insert new 
+entries or when it can stop probing during a lookup. The problem, of course, is that there is no guarantee any  
 particular key value you might choose to represent "unoccupied" won't be inserted! There are naturally many possible 
 solutions to this.
 
@@ -199,12 +204,12 @@ solutions to this.
    the table to use the new empty key before continuing the insertion.
 5. If using a metadata array, represent the empty slot in the metadata array. 
 
-There are of course potential performance implications to all of these choices. If you need to add special cases you'll
-add to code size - too large of a code block can prevent some JVM C2 compiler optimizations and also incur more code
-cache misses. If you need to check a member variable this is an additional load and register usage. Too much register
-usage can cause register spilling and commensurate performance impacts on the hot path. No matter the choice there's
-always a variety of consequences to think through, and pretty much no way to anticipate the impact except through a
-concept we haven't mentioned at all yet (benchmarking).
+There are of course potential performance implications to all of these choices. If you need to add special cases,
+you'll add to code size - too large of a code block can prevent some JVM C2 compiler optimizations and also incur 
+more code cache misses. If you need to check a member variable this is an additional load and register usage. Too 
+much register usage can cause register spilling and commensurate performance impacts on the hot path. No matter the 
+choice there's always a variety of consequences to think through, and pretty much no way to anticipate the impact 
+except through benchmarking.
 
 ### Probing Strategies
 
@@ -231,7 +236,7 @@ Insert E (hashes to slot 5): probe 5→6, insert at 6. Cluster continues to grow
 State: [ ][ ][A][B][C][D][E]
 ```
 
-**[Quadratic probing](https://en.wikipedia.org/wiki/Quadratic_probing)** uses offsets slot+0², slot+1², slot+2²,  
+**[Quadratic probing](https://en.wikipedia.org/wiki/Quadratic_probing)** uses offsets slot+0², slot+1², slot+2², 
 slot+3²... (the probe number squared). It avoids primary clustering but can instead produce secondary clustering 
 (keys with the same initial slot follow identical probe sequences) and over longer probe sequences results in more 
 cache misses than linear probing.
@@ -246,12 +251,12 @@ that swaps entry positions (swapping a "poorer" \[further from it's home slot\] 
 it's home slot\] entry - hence Robin Hood) during insertion to reduce probe length variance. Entries that are "rich" 
 and landed near their ideal slot yield their position to "poor" entries that have traveled further. This equalizes 
 probe lengths and allows much higher load factors without the worst-case blow-up of plain linear probing (Robin Hood 
-hashtables are often run at load factors of .9 without much performance impact).
+hashtables are often run at load factors of 90% without much performance impact).
 
-And finally of course, you can have arbitrarily complex combinations of any probing scheme. A table could linear probe
-for the first N elements, then switch to quadratic probing, or switch to linear probing with a different hash function, 
-etc... The advantage to more complex probing schemes is that you can attempt to equalize the various pros and cons 
-of each. For example, by starting with linear probing you can take advantage of its cache friendly behavior 
+And finally of course, you can have arbitrarily complex combinations of any probing scheme. A table could use linear 
+probing for the first N elements, then switch to quadratic probing, or switch to linear probing with a different hash 
+function, etc... The advantage to more complex probing schemes is that you can attempt to equalize the various pros 
+and cons of each. For example, by starting with linear probing you can take advantage of its cache friendly behavior 
 initially - linear probing for a cache line distance to avoid extra cache misses - then switch to quadratic probing 
 when you're going to incur a cache miss anyway. The downside of these arbitrarily complex combinations is of course 
 code complexity - but also entry removal, which can become very difficult.
@@ -264,18 +269,18 @@ it - this would break the invariants various probing algorithms rely on to funct
 leave a gap in a probe sequence, causing lookups for later keys to terminate early at the gap and incorrectly report 
 a key as not present in the table.
 
-One standard solution is **[lazy deletion](https://en.wikipedia.org/wiki/Lazy_deletion)**: rather than clearing the 
-slot, mark it with a special DELETED value (called a tombstone). Future lookups probe past tombstones, and future 
-insertions can reuse them. Tombstones are very easy to implement, but can accumulate over time. A map with many 
-insertions and deletions will fill up with tombstones, which probe sequences must scan through even though they
-represent no data. This degrades all operations over time. Most implementations address this by triggering a rehash 
-when tombstones exceed some fraction of capacity, but this means delete-heavy workloads periodically pay a 
-full-table rehash cost.
+**[Lazy deletion](https://en.wikipedia.org/wiki/Lazy_deletion)** is one of the more common implementations - rather 
+than clearing the slot, mark it with a special DELETED value (called a tombstone). Future lookups probe past 
+tombstones, and future insertions can reuse them. Tombstones are very easy to implement, but can accumulate over 
+time. A map with many insertions and deletions will fill up with tombstones, which probe sequences must scan through 
+even though they represent no data. This degrades all operations over time. Most implementations address this by 
+triggering a rehash when tombstones exceed some fraction of capacity, but this means delete-heavy workloads 
+periodically pay an additional full-table rehash cost.
 
-**Backward-shift deletion** is an alternative that avoids tombstones entirely. After clearing a slot, the algorithm 
-looks at the next slot and checks if its occupant could shift back one position (i.e., its probe distance is greater
-than zero — it's not at its ideal slot). If so, it shifts back. This continues until an empty slot or a slot whose 
-occupant is already at its ideal position is reached.
+**Backwards-shift deletion** is an alternative that avoids tombstones entirely. After clearing a slot, the algorithm 
+looks at the next slot and checks if its occupant could shift back one probe position (i.e., its probe distance is 
+greater than zero — it's not at its ideal slot). If so, it shifts back. This continues until an empty slot or a slot 
+whose occupant is already at its ideal position is reached.
 
 ```
 Before (d = displacement from ideal):
@@ -293,169 +298,92 @@ Shift C back (d=2, shift allowed):
 
 The result is a table with no tombstones and no gaps — every probe sequence remains contiguous. Lookup and insertion
 performance doesn't degrade after heavy deletion. The cost is that deletion is slightly more expensive, and that
-(1) element displacement must be linear (2) an element's displacement must be calculable. Robin Hood hashing tends to 
-maintain this naturally, so backwards shift deletion is commonly used with Robin Hood hashing, but it is 
-possible with other variations as well.
+(1) element displacement must be linear (2) an element's displacement must be calculable - not every insertion 
+strategy makes it possible to deterministically know an element's displacement. Robin Hood hashing tends to maintain 
+this naturally, so backwards-shift deletion is commonly used with Robin Hood hashing, but it is possible with other 
+variations as well.
 
 ### Hash Functions And Mixing: Avalanche and Bias
 
 So far we've discussed the simple mechanics of how a hashtable works, but avoided thinking too much about the hash 
-function (often assuming a "perfect" hash function). Real life may have problems with these assumptions. Let's start 
-with, what does it even mean to be a perfect hash function?
+function (often assuming a uniformly random hash function).
 
-For a 
-primitive integer map, the key itself is an 
-integer. A naive implementation
-uses that integer directly as the hash. This is what Trove does for `int` keys:
+Theoretically, the ideal is a **perfect hash function**. This is a hash function that maps a set of keys to a set of 
+slots with no collisions at all. This is generally only achievable if the complete set of keys is known in advance 
+(which is not realistic for general-purpose hashtables, but may be in subdomains such as compilers which need to map 
+keywords, etc...). There are a variety of algorithms for attempting to construct perfect hash functions, but as we are 
+concerned with general purpose tables we will not delve deeper or more greedily into the subject.
 
-```java
-// Trove TIntIntHashMap (via identity hash)
-int index = key & mask;  // only low bits determine slot — terrible for sequential keys
-```
+For general purpose scenarios, the ideal is a **uniformly random hash function**. Uniformly random hash functions are a
+theoretical construct for analysis where the collision probability of any two distinct keys is 1/N (where N is the 
+number of slots). This is essentially the idealized limit that real hash functions try to approximate.
 
-The problem is that low-order bits of sequential integers (0, 1, 2, 3...) are
-structured: with a power-of-two table of size 16, keys 0–15 each hit a different
-slot perfectly, but keys 16–31 collide with all of them. This clustering behavior
-is why Trove uses prime tables and double hashing to compensate.
+Real hash functions can be evaluated on several axes:
 
-A good hash function *mixes* or *[avalanches](https://en.wikipedia.org/wiki/Avalanche_effect)* the input bits: every bit of the output
-depends on every bit of the input (or enough of them that bias in the lower bits is
-eliminated). For power-of-two tables where indexing is `hash & (n-1)`, this means
-the lower bits of the hash must be well-mixed.
+* **Collision rate**: How often distinct keys are mapped to the same slot.
+* **Uniformity**: How evenly outputs are spread across the range of slots.
+* **Independence**: Whether the slots chosen for related keys exhibit statistical independence.
+* **Throughput**: Hashes/Second on bulk input.
+* **Latency**: Cycles/Hash for a single key.
+* **Attack resistance**: Can a seed be provided so mapping is unpredictable to an attacker? Is cryptographic 
+  strength required or unnecessary?
 
-The most common approach in this benchmark family is **[Fibonacci/phi multiplicative
-hashing](https://en.wikipedia.org/wiki/Hash_function#Fibonacci_hashing)** followed by a xor shift:
+In order to construct hash functions with good uniformity and independence, we often use the terms:
 
-```java
-// fastutil HashCommon.mix(), Koloboke, HPPC BitMixer.mixPhi(), Speiger HashUtil.mix()
-// (all four libraries use this identical function — Speiger's Javadoc credits Koloboke)
-static int mix(int x) {
-    final int h = x * 0x9E3779B9;  // multiply by golden ratio (2^32 / φ)
-    return h ^ (h >>> 16);          // fold high bits into low bits
-}
-```
+**Avalanching**: Sensitivity to input changes - the ideal is that flipping a single bit in the input should cause 
+50% of the output bits to flip, and the bits that flip are effectively randomly chosen.
+**Bias**: Do any particular outputs or output patterns appear far often than they should (favoring some slots over 
+others and thus increasing collisions)?
+**Entropy**: Another way of discussing avalanching and bias (avalanching means each output bit should have an 
+entropy close to 1 bit conditionally on a single input bit flip, bias means for N bit output, ideal entropy is N 
+bits) - essentially just reframing these in information-theoretic terms.
 
-The constant `0x9E3779B9` is the 32-bit approximation of 2³²/φ (φ = golden ratio ≈
-1.618). Multiplying by it scatters inputs across the full 32-bit range in a Fibonacci
-sequence pattern, which distributes keys uniformly across power-of-two buckets. The
-xorshift-right-16 folds the high bits (which received most of the mixing energy from
-the multiplication) back into the low bits, which are the bits used for bucket
-selection.
-
-AndroidX uses a different constant, taken from MurmurHash:
-
-```kotlin
-// AndroidX ScatterMap.kt / IntIntMap.kt
-internal inline fun hash(k: Int): Int {
-    val hash = k.hashCode() * 0xcc9e2d51.toInt()  // MurmurHash C1
-    return hash xor (hash shl 16)                  // note: left shift (not right)
-}
-```
-
-The left-shift variant (`shl` instead of `ushr`) folds low bits into high bits — the
-opposite direction from the phi-mix. This makes sense for the Swiss Table design,
-where H1 is the *high* bits (used for the initial probe position) and H2 is the *low*
-bits (stored as the fingerprint).
-
-Agrona applies a stronger two-round mix for `int` keys and a three-round mix for
-`long` keys, at the cost of more operations per hash call:
-
-```java
-// Agrona Hashing.java
-public static int hash(final int value) {
-    int x = value;
-    x = ((x >>> 16) ^ x) * 0x119de1f3;  // round 1
-    x = ((x >>> 16) ^ x) * 0x119de1f3;  // round 2
-    return (x >>> 16) ^ x;
-}
-
-public static int hash(final long value) {
-    long x = value;
-    x = (x ^ (x >>> 30)) * 0xbf58476d1ce4e5b9L;  // round 1 (Murmur3 finalize)
-    x = (x ^ (x >>> 27)) * 0x94d049bb133111ebL;  // round 2
-    x = x ^ (x >>> 31);                          // round 3
-    return (int)x ^ (int)(x >>> 32);
-}
-```
-
-The two-round int mix is a variant of Murmur3's finalizer with better avalanche
-properties than the single-multiply phi-mix, but more CPU cycles per call. Whether
-this pays off in benchmark throughput depends on the key distribution: for
-adversarial or clustered inputs it helps; for random inputs, the cheaper phi-mix is
-often sufficient.
-
-Eclipse Collections uses two independent 32-bit spread functions, applied separately
-to select the primary and secondary probe positions:
-
-```java
-// Eclipse Collections SpreadFunctions.java
-private static int thirtyTwoBitSpread1(int code) {
-    code ^= code >>> 15;
-    code *= 0xACAB2A4D;
-    code ^= code >>> 15;
-    code *= 0x5CC7DF53;
-    code ^= code >>> 12;
-    return code;
-}
-
-private static int thirtyTwoBitSpread2(int code) {
-    code ^= code >>> 14;
-    code *= 0xBA1CCD33;
-    code ^= code >>> 13;
-    code *= 0x9B6296CB;
-    code ^= code >>> 12;
-    return code;
-}
-```
-
-These are higher-quality mixes than the single-multiply phi approach (two
-multiply-xorshift rounds each), at higher cost. The use of two independent functions
-is consistent with a double-hashing-like probing strategy rather than pure linear
-probing.
-
-**Implication for benchmarks**: hash function quality becomes visible in performance
-degradation under adversarial or clustered key distributions. For uniformly random
-keys, all mixing functions produce similar collision rates. The benchmark uses both
-sequential and random key distributions to surface this difference.
+It's important to remember however that these methods of evaluating the strength of a hash function are generally 
+predicated on the assumption that keys will be drawn from random input. If there are stronger guarantees on the key 
+space, then perhaps not all of these properties are useful. A common example of this, what if we can assume integer 
+keys can be mapped to [0-N) where N is the table size? This is not an uncommon assumption in many domains, and in 
+this case the identity hash function (i → i) is actually a perfect hash function - even though the identity hash 
+exhibits pretty much no independence (linear key relationships are preserved) and awful avalanching (flipping 1 bit of 
+input = 1 bit changed in output).
 
 #### Knuth Multiplicative Hashing
 
+One of the most common choices of hash function is Knuth Multiplicative Hashing (introduced by Donald Knuth in TAOCP).
+The idea is simply to multiply the input by a large "irrational-ish" constant and extract the high-order bits.
+
+**$h(k) = \left\lfloor m \cdot \left( kA \bmod 1 \right) \right\rfloor$**
+
+* A: A fractional constant between 0 and 1. Knuth proved that the ideal distribution is achieved when
+  A ≈ $(\sqrt{5}- 1) / 2$, which is the inverse of the golden ratio (φ⁻¹).
+* m: The number of slots to map.
+
+When we use the specific inverse phi (φ⁻¹) constant Knuth suggested for its maximally irrational properties, this is 
+known as Fibonacci hashing.
+
+Variants on Knuth multiplicative hashing are used by the FastCollect, Fastutil, AndroidX, Koloboke, HPPC, 
+and PrimitiveCollections libraries. Knuth multiplicative hashing by itself does not have great avalanching 
+properties and tends to concentrate entropy in higher bits, so common variants add an xor-shift operation to (1) 
+improve avalanching (2) improve entropy in the lower bits (recall power-of-two sized tables use `hash & (n-1)` to 
+mask out the slot):
+
+```java
+int hash(int k) {
+    int h = k * INT_PHI;
+    return h ^ (h >>> 16); // fold high bits into low bits
+}
+```
+
+Other libraries may use more complex hash functions, achieving better avalanching properties, at the cost of additional
+cycles to calculate the hash.
+
 ## Libraries Under Test
-
-
-
-| Library              | Storage Schema                                                                  |
-|----------------------|---------------------------------------------------------------------------------|
-| JRE                  | Node pointers with boxed keys/values (can form a linked list or red-black tree) |
-| FastCollect          | Metadata + Interleaved if key/value size matches, Parallel otherwise            |
-| Fastutil             | Parallel                                                                        |
-| AndroidX             | Metadata + Parallel                                                             |
-| Trove                | Metadata + Parallel                                                             |
-| Koloboke             | Interleaved if key/value size matches, Parallel otherwise                       |
-| Eclipse              | Parallel                                                                        |
-| HPPC                 | Parallel                                                                        |
-| Agrona               | Parallel                                                                        |
-| PrimitiveCollections | Parallel                                                                        |
-
-| Library              | Probing Strategy                                                                   |
-|----------------------|------------------------------------------------------------------------------------|
-| JRE                  |                                   |
-| FastCollect          | Robin Hood                                                                         |
-| Fastutil             | Linear probing                                                                     |
-| AndroidX             | Quadratic probing (each probe checks a group of 8 linear entries)                  |
-| Trove                | Double hashing                                                                     |
-| Koloboke             | Linear probing                                                                     |
-| Eclipse              | Combination (linear probing on hash1 -> linear probing on hash2 -> double hashing) |
-| HPPC                 | Linear probing                                                                     |
-| Agrona               | Linear probing                                                                     |
-| PrimitiveCollections | Linear probing                                                                     |
 
 ### JRE
 
 Java's standard library hashtable uses separate chaining: each bucket holds a linked list that is automatically 
 promoted to a red-black tree once it grows too large, bounding worst-case lookup from O(n) to O(log n) per bucket 
-under adversarial key distributions. All keys are stored as boxed `Integer` or `Long` objects on the heap; every 
-primitive key thus incurs an allocation and a pointer indirection on access.
+under adversarial key distributions. All keys are stored as boxed primitive objects on the heap; every key thus incurs
+an allocation and a pointer indirection on access.
 
 * **Storage Schema**: Power-of-two sized, array of node pointers holding boxed keys/values (can form a linked list or 
   red-black tree)
@@ -466,8 +394,8 @@ primitive key thus incurs an allocation and a pointer indirection on access.
 **Integer key hash finalizer**: The hash finalizer performs minimal mixing, relying on the red-black tree fallback 
 behavior to prevent pathological lookups.
 
-```
-key ^ (key >>> 16);
+```java
+return key ^ (key >>> 16)
 ```
 
 ### FastCollect
@@ -476,21 +404,21 @@ key ^ (key >>> 16);
 
 FastCollect is a Kotlin Multiplatform primitive collections library supporting JVM, JS, and native targets.
 
-**Source:** [sooniln/fastcollect](https://github.com/sooniln/fastcollect)  
-**Maven:** `io.github.sooniln:fastcollect-kotlin-jvm:2.0.0`
-**Last release:** June 2026
+**Source**: [sooniln/fastcollect](https://github.com/sooniln/fastcollect)  
+**Maven**: `io.github.sooniln:fastcollect-kotlin-jvm:2.0.1`  
+**Last release**: June 2026
 
 * **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
-* **Probing Strategy**: Linear Probing (Robin Hood)
-* **Removal Strategy**: Backwards shift deletion
+* **Probing Strategy**: Linear probing (Robin Hood)
+* **Removal Strategy**: Backwards-shift deletion
 * **Default Load Factor**: 90% (100% for very small tables)
 
 **Integer key hash finalizer**: FastCollect makes a bet that keys will tend to either fall within the hashtable size 
-bound, or outside of it, and that the branch in the finalizer can thus be easily predicted. If this assumption is 
-not true, performance will suffer (revisited later in the benchmarking section). When the key is not within the size 
+bound, or outside it, and that the branch in the finalizer can thus be easily predicted. If this assumption is not 
+true, performance will suffer (revisited later in the benchmarking section). When the key is not within the size 
 bound uses Knuth multiplicative hashing with constant shift and pre-mixing step.
 
-```
+```java
 if (key < size) {
     return key
 } else {
@@ -504,18 +432,18 @@ if (key < size) {
 
 One of the most comprehensive and widely-adopted JVM primitive collections libraries, Fastutil is very well known.
 
-**Source:** [vigna/fastutil](https://github.com/vigna/fastutil)  
-**Maven:** `it.unimi.dsi:fastutil:8.5.18`  
-**Last release:** October 2025
+**Source**: [vigna/fastutil](https://github.com/vigna/fastutil)  
+**Maven**: `it.unimi.dsi:fastutil:8.5.18`  
+**Last release**: October 2025
 
 * **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
-* **Probing Strategy**: Linear Probing
-* **Removal Strategy**: Backwards shift deletion
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
 * **Default Load Factor**: 75%
 
 **Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
 
-```
+```java
 var h = key * 0x9E3779B9 // PHI
 return h ^ (h >>> 16)
 ```
@@ -527,10 +455,10 @@ The implementation is a Swiss Table design that uses SWAR (SIMD within a registe
 of 8 entries at a time. AndroidX libraries are primarily intended for arm64, though they are distributed as 
 multi-platform. Since benchmarks were run on amd64, care should be taken not to generalize the results.
 
-**Source:** [android.googlesource.com](https://android.googlesource.com/platform/frameworks/support) ([GitHub mirror](https://github.com/androidx/androidx))  
-**Website:** [developer.android.com/jetpack/androidx/releases/collection](https://developer.android.com/jetpack/androidx/releases/collection)  
-**Maven:** `androidx.collection:collection-jvm:1.6.0`  
-**Last release:** March 2026
+**Source**: [android.googlesource.com](https://android.googlesource.com/platform/frameworks/support) ([GitHub mirror](https://github.com/androidx/androidx))  
+**Website**: [developer.android.com/jetpack/androidx/releases/collection](https://developer.android.com/jetpack/androidx/releases/collection)  
+**Maven**: `androidx.collection:collection-jvm:1.6.0`  
+**Last release**: March 2026
 
 * **Storage Schema**: Power-of-two sized, metadata array of 1 byte/entry, parallel arrays for keys/values
   * **Metadata Schema**: Stores low 7 bits of original hash as the metadata fingerprint, the high 25 bits are used to
@@ -540,10 +468,12 @@ multi-platform. Since benchmarks were run on amd64, care should be taken not to 
 * **Default Load Factor**: 87.5%
 
 **Integer key hash finalizer**: Murmur3 finalizer. Note that the left shift instead of right shift would seem to
-concentrate hash entropy further in the upper bits. Keys with no entropy in the low bits we would expect to hurt
-performance (and indeed, benchmarking results confirm this).
+concentrate hash entropy further in the upper bits. This makes some sense for the Swiss Table design, where the 
+initial probe position is calculated from the high bits and the fingerprint is derived from the low bits. But this 
+opens up the risk of perhaps too little entropy in the low bits and thus fingerprint (see benchmarking results for 
+highBits order)...
 
-```
+```java
 var h = key * 0xCC9E2D51 // MurmurHashC1
 return h ^ (h << 16)
 ```
@@ -554,9 +484,9 @@ GNU Trove uses open addressing with double hashing: rather than a fixed linear s
 probe stride from its primary hash, so colliding keys scatter along independent paths and form shorter clusters than
 linear probing would.
 
-**Source:** [bitbucket.org/trove4j/trove](https://bitbucket.org/trove4j/trove)
-**Maven:** `net.sf.trove4j:core:3.1.0`
-**Last release:** August 2018 (due to module split - no active development since ~2012 apparently)
+**Source**: [bitbucket.org/trove4j/trove](https://bitbucket.org/trove4j/trove)  
+**Maven**: `net.sf.trove4j:core:3.1.0`  
+**Last release**: August 2018 (due to module split - no active development since ~2012 apparently)
 
 * **Storage Schema**: Prime sized, metadata array to track slot empty state + parallel arrays for keys/values
     * **Metadata Schema**: Only tracks empty state, which means every probe step has to check both metadata array and
@@ -569,7 +499,7 @@ linear probing would.
 **Integer key hash finalizer**: The identity hash — no bit mixing is applied; distribution quality relies entirely on
 the double-hashing probe and prime sized arrays to counteract clustering.
 
-```
+```java
 // double hashing
 // slot - identity hash
 return key
@@ -580,21 +510,21 @@ return 1 + (key % (length - 2))
 
 ### Koloboke
 
-A high performance collections library from Roman Leventov, appears to have been designed with HFT in mind. Makes use
-Unsafe APIs for performance.
+A high performance collections library from Roman Leventov, appears to have been designed with HFT in mind. It makes
+use of deprecated Unsafe APIs for performance.
 
-**Source:** [leventov/Koloboke](https://github.com/leventov/Koloboke)
-**Maven:** `com.koloboke:koloboke-impl-jdk8:1.0.0`
-**Last release:** May 2016
+**Source**: [leventov/Koloboke](https://github.com/leventov/Koloboke)
+**Maven**: `com.koloboke:koloboke-impl-jdk8:1.0.0`  
+**Last release**: May 2016
 
 * **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
 * **Probing Strategy**: Linear probing
-* **Removal Strategy**: Backwards shift deletion
+* **Removal Strategy**: Backwards-shift deletion
 * **Default Load Factor**: 75%
 
 **Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
 
-```
+```java
 var h = x * 0x9E3779B9 // PHI
 return h ^ (h >>> 16)
 ```
@@ -602,25 +532,25 @@ return h ^ (h >>> 16)
 ### Eclipse
 
 Originally the Goldman Sachs Collections library, donated to the Eclipse Foundation in 2012. Eclipse forces a load 
-factor of 50% - much lower than any other library in this benchmark and which cannot be adjusted. Beware assuming 
+factor of 50% - much lower than any other library in this benchmark - and it cannot be adjusted. Beware assuming 
 an apples to apples comparison. Some experimentation with running other libraries with a 50% load factor indicates 
-they are competitive and may out-perform Eclipse, but full benchmarking has not been performed.
+they are competitive and may outperform Eclipse, but full benchmarking has not been performed.
 
-**Source:** [eclipse/eclipse-collections](https://github.com/eclipse/eclipse-collections)  
-**Website:** [eclipse.dev/collections](https://eclipse.dev/collections/)  
-**Maven:** `org.eclipse.collections:eclipse-collections:13.0.0`
-**Last release:** December 24, 2024
+**Source**: [eclipse/eclipse-collections](https://github.com/eclipse/eclipse-collections)  
+**Website**: [eclipse.dev/collections](https://eclipse.dev/collections/)  
+**Maven**: `org.eclipse.collections:eclipse-collections:13.0.0`  
+**Last release**: December 24, 2024
 
 * **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
-* **Probing Strategy**: Combination (linear probing on hash1 for half a cache line -> linear probing on hash2 for 
-  half a cache line -> double hashing)
+* **Probing Strategy**: Combination (linear probing on hash1 for half a cache line → linear probing on hash2 for 
+  half a cache line → double hashing)
 * **Removal Strategy**: Tombstones - tombstones count towards rehashing load factor
 * **Default Load Factor**: 50%
 
 **Integer key hash finalizer**: 3 separate hash finalizers for the various probing steps. It's not entirely clear where 
 the constants come from.
 
-```
+```java
 // hash1 - identity hash
 return key
 
@@ -645,22 +575,21 @@ return Integer.reverse(hash2(key)) | 1
 
 ### HPPC
 
-High Performance Primitive Collections, maintained by Carrot Search. Iteration uses a randomized starting offset (seeded per-instance) to prevent
-consistent worst-case traversal patterns. The `mixPhi(long)` variant XOR-folds its result to `int` directly, unlike fastutil's `mix(long)` which preserves the full 64-bit result.
+High Performance Primitive Collections, maintained by Carrot Search.
 
-**Source:** [carrotsearch/hppc](https://github.com/carrotsearch/hppc)  
-**Website:** [labs.carrotsearch.com/hppc.html](https://labs.carrotsearch.com/hppc.html)  
-**Maven:** `com.carrotsearch:hppc:0.10.0`  
+**Source**: [carrotsearch/hppc](https://github.com/carrotsearch/hppc)  
+**Website**: [labs.carrotsearch.com/hppc.html](https://labs.carrotsearch.com/hppc.html)  
+**Maven**: `com.carrotsearch:hppc:0.10.0`  
 **Last release:** June 2024
 
 * **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
 * **Probing Strategy**: Linear probing
-* **Removal Strategy**: Backwards shift deletion
+* **Removal Strategy**: Backwards-shift deletion
 * **Default Load Factor**: 75%
 
 **Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
 
-```
+```java
 var h = key * 0x9E3779B9 // PHI
 return h ^ (h >>> 16)
 ```
@@ -668,25 +597,25 @@ return h ^ (h >>> 16)
 ### Agrona
 
 Agrona is Real Logic's utility library, developed primarily to support the [Aeron](https://github.com/aeron-io/aeron)
-messaging system. Agrona enforces every map must have an unrepresentable value passed in on initialization (to mark 
-empty slots), thus Agrona is incapable of representing the full range of values.
+messaging system. Agrona requires every map must have an unrepresentable value passed in on initialization (to mark 
+empty slots); thus Agrona is incapable of representing the full range of values.
 
 Note: Since Agrona does not have a Long → Int map, benchmarking uses Long → Long maps instead, and widens values. Be 
 wary of apples to apples comparisons.
 
-**Source:** [aeron-io/agrona](https://github.com/aeron-io/agrona)  
-**Maven:** `org.agrona:agrona:2.4.1`  
-**Last release:** April 2026
+**Source**: [aeron-io/agrona](https://github.com/aeron-io/agrona)
+**Maven**: `org.agrona:agrona:2.4.1`  
+**Last release**: April 2026
 
-* **Storage Schema**: Power-of-two sized, interleaved arrays for keys/values (Agrona does not support key and values 
+* **Storage Schema**: Power-of-two sized, interleaved arrays for keys/values (Agrona does not support keys and values 
   with different sizes)
-* **Probing Strategy**: Linear Probing
-* **Removal Strategy**: Backwards shift deletion
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
 * **Default Load Factor**: 65%
 
 **Integer key hash finalizer**: Two-round XOR-shift/multiply from Chris Wellons' Hash Prospector.
 
-```
+```java
 var h = key ^ (key >>> 16)
 h = h * 0x119DE1f3
 h = h ^ (h >>> 16)
@@ -698,18 +627,18 @@ return h ^ (h >>> 16)
 
 PrimitiveCollections is a library explicitly aimed at duplicating and outperforming fastutil.
 
-**Source:** [Speiger/Primitive-Collections](https://github.com/Speiger/Primitive-Collections)  
-**Maven:** `io.github.speiger:Primitive-Collections:1.0.0`  
-**Last release:** May 2026
+**Source**: [Speiger/Primitive-Collections](https://github.com/Speiger/Primitive-Collections)  
+**Maven**: `io.github.speiger:Primitive-Collections:1.0.0`  
+**Last release**: May 2026
 
 * **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
-* **Probing Strategy**: Linear Probing
-* **Removal Strategy**: Backwards shift deletion
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
 * **Default Load Factor**: 75%
 
 **Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
 
-```
+```java
 var h = key * 0x9E3779B9 // PHI
 return h ^ (h >>> 16)
 ```
@@ -763,16 +692,16 @@ that can represent real world scenarios. We specify 3 key orders to test under:
   only a subset of keys are stored - for example if a hashtable is being used as a cache.
 * **lowBits**: Keys are selected from 0 → table size and shuffled randomly. This has the effect that only the least 
   significant bits of the key tend to be set, and most significant bits are all zero. This represents scenarios where 
-  almost the entire key set is stored.
+  keys are generally linear and almost all keys are stored - for example internal id values.
 * **highBits**: The same as lowBits, but every key is bit-reversed, so that the most significant bits tend to be set,
   and the least significant are all zero. This represents two scenarios - (1) an easy adversarial attack (since the 
   vast majority of hashtables are power-of-two sized, we know that they will usually truncate high bits in order to 
   calculate a slot - without good bit-mixing properties these tables may be vulnerable) (2) structures that have been 
   bit-packed into keys and thus have unusually structured bits (for example, a Point class can trivially be encoded as 
-  a 64 bit value).
+  a 64-bit value).
 
 In practice, I suspect (with no evidence other than gut feeling) that random and lowBits are likely to represent the 
-majority of real world scenarios in the JVM ecosystem.
+majority of real-world scenarios in the JVM ecosystem.
 
 ### Benchmark Selection
 
@@ -817,6 +746,36 @@ Rather than forcing you to scroll past the excessive graphs and numbers below wh
 might as well cut to the chase, right?
 
 ### FastCollect Branch Prediction
+
+### AndroidX Timeouts + Performance Cliff
+
+AndroidX benchmarks appear to hit a performance cliff at > ~32 million entries. In addition, the AndroidX 
+benchmarks timeout at very high numbers of entries, so there is no data for > ~32 million entries. These are actually 
+two separate issues.
+
+#### Benchmark Timeout
+
+The timeout which leads to no benchmark data is not occurring within the benchmark, but within the setup method for 
+the benchmark, while the hashtable is being loaded. AndroidX does not offer any ensureCapacity() functionality, 
+meaning we cannot pre-size the table appropriately to reduce the cost of loading it - loading must go through a full 
+set of rehashes, which is much more expensive. There are a couple other tables that also do not offer ensureCapacity()
+either however and do not timeout, why is AndroidX still more expensive than these tables?
+
+This comes down to a couple features of AndroidX's design:
+* Three separate tables (metadata, keys, values) - more cache misses than 1-2 tables.
+* Metadata table must be initialized with a non-zero value - 2x the initialization cost on this table.
+* Higher load factor (87.5%) means more elements to rehash every rehash.
+
+I suspect that if AndroidX offered an ensureCapacity() API it would ameliorate these issues sufficiently to allow for
+benchmarking at higher sizes and further investigate the performance cliff.
+
+#### Performance Cliff At ~32 Million
+
+With about 32 million entries, AndroidX's metadata array (1 byte per entry) jumps from ~32MB to ~64MB, and thus no 
+longer fits in the L3 cache of the benchmarking machine (32MB). Almost every probe is hitting cold memory 
+(likely further exacerbated by the geometric probing sequence?). It's worth remembering that AndroidX is primarily 
+intended for use on Android devices, which are likely to have a much smaller L3 cache than the desktop device used 
+for this benchmarking.
 
 ### 50% Load Factor
 
@@ -882,7 +841,7 @@ fallback to red-black trees instead of linked lists for storage - note how JRE p
 {{< benchmark-chart benchmark="IntMap.putHit" order="random" title="Int → Int / putHit — random keys" >}}
 
 Our "usual suspects" for linear probing implementations appears to be more competitive with Eclipse for put 
-operations rather than get operations. Otherwise, nothing to shocking here, though JRE performance does appear to 
+operations rather than get operations. Otherwise, nothing too shocking here, though JRE performance does appear to 
 fall off a cliff at large sizes...
 
 {{< benchmark-chart benchmark="IntMap.putHit" order="lowBits" title="Int → Int / putHit — lowBits keys" >}}
@@ -922,7 +881,7 @@ highBits removeAndPutMiss benchmarks as well.
 
 {{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="lowBits" title="Int → Int / removeAndPutMiss — lowBits keys" >}}
 
-Overall not much change for lowBits benchmarks vs random - do note however that Trove has *not* improved relative 
+Overall, not much change for lowBits benchmarks vs random - do note however that Trove has *not* improved relative 
 to random, as we saw for all the get/put benchmarks...
 
 {{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="highBits" title="Int → Int / removeAndPutMiss — highBits keys" >}}
