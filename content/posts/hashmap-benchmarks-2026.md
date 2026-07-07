@@ -1,7 +1,7 @@
 ---
 title: "Comprehensive JVM Primitive Hashtable Benchmarks 2026"
 date: 2026-06-18
-draft: true
+draft: false
 ShowToc: true
 TocOpen: true
 math: true
@@ -403,10 +403,11 @@ return key ^ (key >>> 16)
 
 *Disclosure: I am the author of FastCollect.*
 
-FastCollect is a Kotlin Multiplatform primitive collections library supporting JVM, JS, and native targets.
+FastCollect is a Kotlin Multiplatform primitive collections library supporting JVM, JS, and native targets. The map 
+implementation currently uses Robin Hood hashtables because I wanted to play around with them.
 
 **Source**: [sooniln/fastcollect](https://github.com/sooniln/fastcollect)  
-**Maven**: `io.github.sooniln:fastcollect-kotlin-jvm:2.0.1`  
+**Maven**: `io.github.sooniln:fastcollect-kotlin-jvm:2.0.2`  
 **Last release**: June 2026
 
 * **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise

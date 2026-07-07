@@ -74,6 +74,8 @@
       data: { datasets: datasets },
       options: {
         responsive: true,
+        maintainAspectRatio: true,
+        aspectRatio: 2,
         parsing: false,
         plugins: {
           title: { display: true, text: TITLE, font: { size: 14 } },
@@ -81,7 +83,7 @@
           tooltip: {
             callbacks: {
               title: function (items) {
-                return items.length ? 'Size: ' + fmtSize(items[0].raw._size) : '';
+                return items.length ? 'Size: ' + items[0].raw._size : '';
               },
               label: function (ctx) {
                 return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + ' ' + unit;
@@ -120,6 +122,8 @@
     });
   }
 
-  fetch('/libraries.csv').then(function (r) { return r.text(); }).then(buildChart);
+  window.__benchmarkCsvPromise = window.__benchmarkCsvPromise ||
+    fetch('/libraries.csv').then(function (r) { return r.text(); });
+  window.__benchmarkCsvPromise.then(buildChart);
 }());
 </script>
