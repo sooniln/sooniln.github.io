@@ -1,7 +1,7 @@
 ---
 title: "Comprehensive JVM Primitive Hashtable Benchmarks 2026"
 date: 2026-06-18
-draft: false
+draft: true
 ShowToc: true
 TocOpen: true
 math: true
@@ -12,8 +12,8 @@ charts: true
 
 Hashtables are one of the building blocks of computer science, and deservedly get a lot of attention - but less so
 within the JVM ecosystem. Part of this may simply be that most Java code is not written with performance top of mind,
-or that the default JRE implementation is all-around quite good - reasonably efficient, resistant against attacks, 
-etc... I'm interested however in focusing entirely on performance today.
+or that the default JRE implementation is all-around quite reasonable - efficient, resistant against attacks, etc... 
+However, I'm interested however in focusing entirely on performance right now.
 
 For today, we're interested specifically in hashtables for primitive values. By focusing on values rather than
 references we'll entirely ignore the cost of heap allocation, pointer dereferencing, GC pressure, and also come up 
@@ -25,7 +25,7 @@ such as no boxing, no pointer indirection, better cache locality, etc... The JVM
 libraries that address this by providing hashtables backed by primitive arrays. The problem is that the performance 
 tradeoffs and design choices between them are neither obvious nor well-documented anywhere. Many different choices 
 are made around hash functions, collision resolution strategies, load factors, and those choices produce
-meaningfully different performance profiles.
+meaningfully different performance profiles yet there is pretty much no data available on head-to-head performance.
 
 We'll benchmark and analyze the following libraries (links go to more detailed information lower down this page):
 
@@ -40,11 +40,11 @@ We'll benchmark and analyze the following libraries (links go to more detailed i
 * [Agrona](#agrona)
 * [PrimitiveCollections](#primitive-collections)
 
-You may note that several of the libraries benchmarked here are quite old and/or no longer maintained. The larger 
-purpose of this post is not to determine which is fastest (well - we all know that's a kinda cute lie), but to 
-investigate in detail the design choices that affect hashtable performance. Also note that the JRE is the only library
-here truly suited for external use (when an attacker can control the table) - most of these libraries have abandoned any
-pretense at resisting DoS attacks in favor of raw performance (both is rarely an option).
+You may note that several of the libraries benchmarked here are quite old and/or no longer maintained. Others are 
+not intended for general purpose usage. The larger purpose of this post is not to determine which is fastest, but to 
+investigate the design choices that affect hashtable performance. Also note that the JRE is the only library here 
+truly suited for external use (when an attacker can control the table) - most of these libraries have abandoned any 
+pretense at resisting DoS attacks in favor of raw performance.
 
 Full benchmarking code is available at https://github.com/sooniln/jvm-collections-benchmarks.
 
@@ -172,15 +172,16 @@ Rather than storing keys/values directly in the primary hashtable arrays, there 
 For example, [Robin Hood](https://en.wikipedia.org/wiki/Robin_Hood_hashing) hashtables may store probe sequence 
 lengths (PSLs - how far a key is located from the slot it hashed to), and
 [Swiss tables](https://abseil.io/about/design/swisstables) store key fingerprints. Given that the metadata is 
-usually substantially smaller than the key size, metadata cannot easily be interleaved with keys. If probing now 
-requires accessing both metadata and keys this will incur many more cache misses, so when metadata is used probing 
+usually substantially smaller than the key size, metadata often cannot easily be interleaved with keys. If probing now 
+requires accessing both metadata and keys this will incur many more cache misses, so when metadata is used, probing 
 will almost always attempt to only access metadata (which is what makes key fingerprints so useful), and access keys 
 only when absolutely necessary.
 
 There are also hashtables that store indirect indices which point into separate key/value storage. This allows 
 key/value storage to be much denser than the main hashtable, potentially saving space, at the cost of an additional 
 level of indirection. This might allow a hashtable to use a load factor of 50% or lower, knowing that it will only 
-apply to a small metadata table, while keys/values are packed tightly.
+apply to a small metadata table, while keys/values are packed tightly. None of the hashtables being benchmarked use 
+this technique.
 
 Finally, there is one more advantage to metadata - it can help with representing empty slots, which will be discussed 
 in the next section.
@@ -251,7 +252,7 @@ that swaps entry positions (swapping a "poorer" \[further from it's home slot\] 
 it's home slot\] entry - hence Robin Hood) during insertion to reduce probe length variance. Entries that are "rich" 
 and landed near their ideal slot yield their position to "poor" entries that have traveled further. This equalizes 
 probe lengths and allows much higher load factors without the worst-case blow-up of plain linear probing (Robin Hood 
-hashtables are often run at load factors of 90% without much performance impact).
+hashtables are often run at load factors of 80%+ without much performance impact).
 
 And finally of course, you can have arbitrarily complex combinations of any probing scheme. A table could use linear 
 probing for the first N elements, then switch to quadratic probing, or switch to linear probing with a different hash 
@@ -362,7 +363,7 @@ known as Fibonacci hashing.
 
 Variants on Knuth multiplicative hashing are used by the FastCollect, Fastutil, AndroidX, Koloboke, HPPC, 
 and PrimitiveCollections libraries. Knuth multiplicative hashing by itself does not have great avalanching 
-properties and tends to concentrate entropy in higher bits, so common variants add an xor-shift operation to (1) 
+properties and tends to concentrate entropy in higher bits, so common variants add a xor-shift operation to (1) 
 improve avalanching (2) improve entropy in the lower bits (recall power-of-two sized tables use `hash & (n-1)` to 
 mask out the slot):
 
@@ -373,8 +374,8 @@ int hash(int k) {
 }
 ```
 
-Other libraries may use more complex hash functions, achieving better avalanching properties, at the cost of additional
-cycles to calculate the hash.
+Knuth multiplicative hashing is only one hashing strategy however, and there exist many other possibilities, all 
+with their own lists of upsides and downsides.
 
 ## Libraries Under Test
 
@@ -411,22 +412,33 @@ FastCollect is a Kotlin Multiplatform primitive collections library supporting J
 * **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
 * **Probing Strategy**: Linear probing (Robin Hood)
 * **Removal Strategy**: Backwards-shift deletion
-* **Default Load Factor**: 90% (100% for very small tables)
+* **Default Load Factor**: 83.3% (100% for very small tables)
 
-**Integer key hash finalizer**: FastCollect makes a bet that keys will tend to either fall within the hashtable size 
-bound, or outside it, and that the branch in the finalizer can thus be easily predicted. If this assumption is not 
-true, performance will suffer (revisited later in the benchmarking section). When the key is not within the size 
-bound uses Knuth multiplicative hashing with constant shift and pre-mixing step.
+**Integer key hash finalizer**: FastCollect takes a different approach to multiplicative hashing than most of the 
+other libraries benchmarked. Several of the other libraries all use the same hash finalizer (which appears to have 
+originally come from the Koloboke library many years ago - `(h * PHI) ^ ((h * PHI) >>> 16)`). It seems worth 
+revisiting this finalizer as it exhibits several poor qualities that can be improved upon. While it is cheap, the 
+multiplication concentrates entropy in the high bits, yet it is only the low bits that will be used to derive the 
+slot. Some effort is made to ameliorate this with the xor-shift, but it is generally insufficient. This finalizer 
+exhibits worse results when given non-random inputs.
+
+For the FastCollect finalizer the key realization is that simply reversing the order of bits in the multiplication 
+result puts the most entropy exactly where we want it, in the low bits. The problem is that while bit-reversal is a 
+single instruction (RBIT) on ARM, x86-64 does not have a similar instruction. Divide and conquer + BSWAP approaches 
+and similar can make bit-reversal reasonably cheap, but not single cycle cheap like RBIT. Since benchmarking is 
+occurring on x86-64 we choose a slightly different approach: premix bits, multiply by PHI, and then reverse the 
+bytes (not bits) with BSWAP/REV.
 
 ```java
-if (key < size) {
-    return key
-} else {
-    var h = key ^ (key >>> 16)
-    h *= 0x9E3779B9 // PHI
-    return h ^ (h >>> 16)
-}
+var h = ((key ^ (key >>> 16)) * 0x9E3779B9  // PHI
+return Integer.reverseBytes(h)
 ```
+
+It would be very interesting to look into RBIT finalizers more on ARM platforms, it seems a much cheaper way of 
+achieving higher levels of entropy in a targeted part of the bit pattern, rather than focusing on achieving even 
+levels of entropy in all parts of the pattern (as more complex functions like murmur3, etc... appear to do). I am not 
+aware of any hashtable implementations that have experimented with this, and it could be there are hidden weaknesses 
+to this approach that I am not aware of.
 
 ### Fastutil
 
@@ -444,7 +456,7 @@ One of the most comprehensive and widely-adopted JVM primitive collections libra
 **Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
 
 ```java
-var h = key * 0x9E3779B9 // PHI
+var h = key * 0x9E3779B9
 return h ^ (h >>> 16)
 ```
 
@@ -673,7 +685,7 @@ similar comparisons we try to enforce that every hashtable has a load factor of 
 | Library              | Default | Benchmarked | Adjustable |
 |----------------------|---------|-------------|------------|
 | JRE                  | 75%     | 75%         | Yes        |
-| FastCollect          | 90%     | 90%         | No         |
+| FastCollect          | 83.3%   | 83.3%       | No         |
 | Fastutil             | 75%     | 75%         | Yes        |
 | AndroidX             | 87.5%   | 87.5%       | No         |
 | Trove                | 50%     | 75%         | Yes        |
@@ -721,31 +733,46 @@ We benchmark the following operations:
   the table. The setup of JMH tests makes it difficult to accurately quantify the cost of just a remove operation - 
   this is a compromise.
 * **forEach**: The cost of iterating over every key/value present in the hashtable using the fastest iteration 
-  technique exposed by the hashtable.
+  technique exposed by the hashtable (likely not iterators).
 * **naiveCopy**: The cost of copying the hashtable starting from empty and inserting elements until complete - 
   with no information given on the total number of elements to be expected, so no pre-allocation can be done.
-* **preAllocatedCopy**: The cost of copying the hashtable directly as cheaply as possible (may just be a memcpy in the
-  cheapest case).
+* **preAllocatedCopy**: The cost of copying the hashtable directly from another hashtable (so size and layout is 
+  known - may just be a memcpy in the cheapest case).
 
 ### Major Caveats **PLEASE READ**
 
-standard micros benchmark caveats
+Micro-benchmarking (as we're performing here) does not give you real world performance results. In the best case, it 
+can give you a "platonic ideal" of performance for primitive operations (which real world results can approach, but 
+will likely never achieve). These methods are being benchmarked in pretty much the most optimal conditions possible, 
+branches are highly predictable, memory access patterns are similar every run, etc... It is difficult to overstate 
+how much this can affect performance.
 
-no benchmarking of tombstones
+The other major problem is that micro-benchmarking results are not composable: If `X.a()` is benchmarked at 5ns, and
+`X.b()` is benchmarked at 10ns, is `X.a() + X.b()` = 15ns? Absolutely not - microbenchmarking results fall apart when
+you try to compose them. The benchmark of X.a() might be run with the precondition that condition Y is always true, and
+the benchmark of X.b() might be run with the precondition that condition Y is always false... The trivial example is 
+getHit() and getMiss() benchmarking in our results. The precondition of getHit() is that the lookup key is always in 
+the table. The precondition of getMiss() is that the lookup key is never in the table. Benchmarking for both can achieve
+almost perfect branch prediction because of this. Real world performance is going to be highly dependent on the 
+exact pattern of hits/misses real world data gives you.
+
+In addition to the standard micro-benchmarking caveats, there are also hash table specific caveats. Notably, 
+hashtables that use tombstones for removal can have these substantially affect lookup times - but we performed no 
+benchmarking of removal + lookup scenarios. There are many other scenarios that could affect performance that were 
+also uncovered in any benchmarking - it's impossible to cover everything.
 
 ## Benchmark Results
 
 Raw benchmark results can be downloaded [here](/libraries.csv).
 
 While viewing graphs, you may use the button to switch the time axis between log scale and linear scale. Clicking on 
-a library in the legend will hide/show the data for that library.
+a library in the legend will hide/show the data for that library. The mouse can be used to pan/zoom the graphs. 
+Double-clicking a graph will reset its pan/zoom. 
 
 ### Overall Results
 
 Rather than forcing you to scroll past the excessive graphs and numbers below which go into individual scenarios, 
 might as well cut to the chase, right?
-
-### FastCollect Branch Prediction
 
 ### AndroidX Timeouts + Performance Cliff
 
@@ -759,7 +786,7 @@ The timeout which leads to no benchmark data is not occurring within the benchma
 the benchmark, while the hashtable is being loaded. AndroidX does not offer any ensureCapacity() functionality, 
 meaning we cannot pre-size the table appropriately to reduce the cost of loading it - loading must go through a full 
 set of rehashes, which is much more expensive. There are a couple other tables that also do not offer ensureCapacity()
-either however and do not timeout, why is AndroidX still more expensive than these tables?
+either however and do not time out, why is AndroidX still more expensive than these tables?
 
 This comes down to a couple features of AndroidX's design:
 * Three separate tables (metadata, keys, values) - more cache misses than 1-2 tables.
@@ -773,9 +800,10 @@ benchmarking at higher sizes and further investigate the performance cliff.
 
 With about 32 million entries, AndroidX's metadata array (1 byte per entry) jumps from ~32MB to ~64MB, and thus no 
 longer fits in the L3 cache of the benchmarking machine (32MB). Almost every probe is hitting cold memory 
-(likely further exacerbated by the geometric probing sequence?). It's worth remembering that AndroidX is primarily 
+(perhaps further exacerbated by the geometric probing sequence?). It's worth remembering that AndroidX is primarily 
 intended for use on Android devices, which are likely to have a much smaller L3 cache than the desktop device used 
-for this benchmarking.
+for this benchmarking. The end result however is that performance drops off a cliff such that benchmarking methods 
+timeout rather than completing in a reasonable amount of time.
 
 ### 50% Load Factor
 
