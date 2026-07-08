@@ -183,6 +183,10 @@ level of indirection. This might allow a hashtable to use a load factor of 50% o
 apply to a small metadata table, while keys/values are packed tightly. None of the hashtables being benchmarked use 
 this technique.
 
+Techniques that use larger amounts of metadata can payoff quite well - but they tend to be used in more general purpose
+hashtables which allow for storage of larger keys and values. When speaking of JVM primitives, which max out at 64 
+bits, 32 bits of overhead is quite substantial...
+
 Finally, there is one more advantage to metadata - it can help with representing empty slots, which will be discussed 
 in the next section.
 
@@ -355,19 +359,23 @@ The idea is simply to multiply the input by a large "irrational-ish" constant an
 **$h(k) = \left\lfloor m \cdot \left( kA \bmod 1 \right) \right\rfloor$**
 
 * A: A fractional constant between 0 and 1. Knuth proved that the ideal distribution is achieved when
-  A ≈ $(\sqrt{5}- 1) / 2$, which is the inverse of the golden ratio (φ⁻¹).
+  A ≈ $(\sqrt{5}- 1) / 2$, which is the inverse of the golden ratio (φ⁻¹). Moving forward we'll refer to φ as PHI 
+  for simplicity.
 * m: The number of slots to map.
 
-When we use the specific inverse phi (φ⁻¹) constant Knuth suggested for its maximally irrational properties, this is 
+When we use the specific inverse PHI (φ⁻¹) constant Knuth suggested for its maximally irrational properties, this is 
 known as Fibonacci hashing.
 
 Variants on Knuth multiplicative hashing are used by the FastCollect, Fastutil, AndroidX, Koloboke, HPPC, 
 and PrimitiveCollections libraries. Knuth multiplicative hashing by itself does not have great avalanching 
-properties and tends to concentrate entropy in higher bits, so common variants add a xor-shift operation to (1) 
-improve avalanching (2) improve entropy in the lower bits (recall power-of-two sized tables use `hash & (n-1)` to 
-mask out the slot):
+properties and tends to concentrate entropy in higher bits (rather, the entropy is in the fractional part of the 
+result, which since we are using integer multiplication and PHI values adjusted by 2^32, ends up being the high 
+bits of the result), so common variants add a xor-shift operation to (1) improve avalanching (2) improve entropy in 
+the lower bits (recall power-of-two sized tables use `hash & (n-1)` to mask out the slot):
 
 ```java
+final int INT_PHI = 0x9E3779B9 // 2^32 / PHI, where PHI is the golden ratio
+
 int hash(int k) {
     int h = k * INT_PHI;
     return h ^ (h >>> 16); // fold high bits into low bits
@@ -483,7 +491,7 @@ multi-platform. Since benchmarks were run on amd64, care should be taken not to 
 **Integer key hash finalizer**: Murmur3 finalizer. Note that the left shift instead of right shift would seem to
 concentrate hash entropy further in the upper bits. This makes some sense for the Swiss Table design, where the 
 initial probe position is calculated from the high bits and the fingerprint is derived from the low bits. But this 
-opens up the risk of perhaps too little entropy in the low bits and thus fingerprint (see benchmarking results for 
+opens up the risk of perhaps too little entropy in the low bits and thus the fingerprint (see benchmarking results for 
 highBits order)...
 
 ```java
@@ -740,7 +748,7 @@ We benchmark the following operations:
 * **preAllocatedCopy**: The cost of copying the hashtable directly from another hashtable (so size and layout is 
   known - may just be a memcpy in the cheapest case).
 
-### Major Caveats **PLEASE READ**
+### Micro-Benchmarking Caveats
 
 Micro-benchmarking (as we're performing here) does not give you real world performance results. In the best case, it 
 can give you a "platonic ideal" of performance for primitive operations (which real world results can approach, but 
@@ -748,8 +756,8 @@ will likely never achieve). These methods are being benchmarked in pretty much t
 branches are highly predictable, memory access patterns are similar every run, etc... It is difficult to overstate 
 how much this can affect performance.
 
-The other major problem is that micro-benchmarking results are not composable: If `X.a()` is benchmarked at 5ns, and
-`X.b()` is benchmarked at 10ns, is `X.a() + X.b()` = 15ns? Absolutely not - microbenchmarking results fall apart when
+The other major problem is that micro-benchmarking results are not composable: If `a()` is benchmarked at 5ns, and
+`b()` is benchmarked at 10ns, is `a() + b()` = 15ns? Absolutely not - microbenchmarking results fall apart when
 you try to compose them. The benchmark of X.a() might be run with the precondition that condition Y is always true, and
 the benchmark of X.b() might be run with the precondition that condition Y is always false... The trivial example is 
 getHit() and getMiss() benchmarking in our results. The precondition of getHit() is that the lookup key is always in 
@@ -768,7 +776,7 @@ Raw benchmark results can be downloaded [here](/libraries.csv).
 
 While viewing graphs, you may use the button to switch the time axis between log scale and linear scale. Clicking on 
 a library in the legend will hide/show the data for that library. The mouse can be used to pan/zoom the graphs. 
-Double-clicking a graph will reset its pan/zoom. 
+Double-clicking a graph will reset its pan/zoom.
 
 ### Overall Results
 
@@ -794,7 +802,7 @@ This comes down to a couple features of AndroidX's design:
 * Metadata table must be initialized with a non-zero value - 2x the initialization cost on this table.
 * Higher load factor (87.5%) means more elements to rehash every rehash.
 
-I suspect that if AndroidX offered an ensureCapacity() API it would ameliorate these issues sufficiently to allow for
+I suspect that if AndroidX offered an `ensureCapacity()` API it would ameliorate these issues sufficiently to allow for
 benchmarking at higher sizes and further investigate the performance cliff.
 
 #### Performance Cliff At ~32 Million
@@ -803,8 +811,7 @@ With about 32 million entries, AndroidX's metadata array (1 byte per entry) jump
 longer fits in the L3 cache of the benchmarking machine (32MB). Almost every probe is hitting cold memory 
 (perhaps further exacerbated by the geometric probing sequence?). It's worth remembering that AndroidX is primarily 
 intended for use on Android devices, which are likely to have a much smaller L3 cache than the desktop device used 
-for this benchmarking. The end result however is that performance drops off a cliff such that benchmarking methods 
-timeout rather than completing in a reasonable amount of time.
+for this benchmarking.
 
 ### 50% Load Factor
 
