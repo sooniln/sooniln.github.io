@@ -30,7 +30,10 @@
     return String(n);
   }
 
-  function buildChart(csv) {
+  window.__benchmarkCsvPromise = window.__benchmarkCsvPromise ||
+    fetch('/libraries.csv').then(function (r) { return r.text(); });
+
+  window.__benchmarkDataPromise = window.__benchmarkDataPromise || window.__benchmarkCsvPromise.then(function (csv) {
     var lines = csv.split(/\r?\n/);
     var h = lines[0].split(',');
     var iB = h.indexOf('benchmark');
@@ -38,21 +41,29 @@
     var iO = h.indexOf('order');
     var iS = h.indexOf('size');
     var iM = h.indexOf('median');
-
     var iU = h.indexOf('unit');
-    var unit = '';
-    var byLib = {};
+
+    var byKey = {};
     for (var i = 1; i < lines.length; i++) {
       if (!lines[i]) continue;
       var c = lines[i].split(',');
-      if (c[iB] !== BENCHMARK || c[iO] !== ORDER) continue;
-      if (!unit && iU >= 0) unit = c[iU];
+      var key = c[iB] + '|' + c[iO];
+      var entry = byKey[key];
+      if (!entry) entry = byKey[key] = { unit: '', byLib: {} };
+      if (!entry.unit && iU >= 0) entry.unit = c[iU];
       var lib = c[iL];
       var size = +c[iS];
       var median = +c[iM];
-      if (!byLib[lib]) byLib[lib] = [];
-      byLib[lib].push({ x: Math.log2(size), y: median, _size: size });
+      if (!entry.byLib[lib]) entry.byLib[lib] = [];
+      entry.byLib[lib].push({ x: Math.log2(size), y: median, _size: size });
     }
+    return byKey;
+  });
+
+  function buildChart(data) {
+    var entry = data[BENCHMARK + '|' + ORDER] || { unit: '', byLib: {} };
+    var unit = entry.unit;
+    var byLib = entry.byLib;
 
     var libs = Object.keys(byLib).sort();
     var datasets = libs.map(function (lib, i) {
@@ -122,8 +133,25 @@
     });
   }
 
-  window.__benchmarkCsvPromise = window.__benchmarkCsvPromise ||
-    fetch('/libraries.csv').then(function (r) { return r.text(); });
-  window.__benchmarkCsvPromise.then(buildChart);
+  function loadAndBuild() {
+    Promise.all([window.__benchmarkDataPromise, window.__chartJsReady]).then(function (results) {
+      buildChart(results[0]);
+    });
+  }
+
+  var canvasEl = document.getElementById(CHART_ID);
+  if ('IntersectionObserver' in window) {
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          observer.unobserve(entry.target);
+          loadAndBuild();
+        }
+      });
+    }, { rootMargin: '200px 0px' });
+    observer.observe(canvasEl);
+  } else {
+    loadAndBuild();
+  }
 }());
 </script>
