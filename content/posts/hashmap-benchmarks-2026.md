@@ -38,7 +38,7 @@ We'll benchmark and analyze the following libraries (links go to more detailed i
 * [Koloboke](#koloboke)
 * [HPPC](#hppc)
 * [Agrona](#agrona)
-* [PrimitiveCollections](#primitive-collections)
+* [PrimitiveCollections](#primitivecollections)
 
 You may note that several of the libraries benchmarked here are quite old and/or no longer maintained. Others are 
 not intended for general purpose usage. The larger purpose of this post is not to determine which is fastest, but to 
@@ -644,9 +644,9 @@ h = h * 0x119DE1f3
 return h ^ (h >>> 16)
 ```
 
-### Primitive Collections
+### PrimitiveCollections
 
-PrimitiveCollections is a library explicitly aimed at duplicating and outperforming fastutil.
+PrimitiveCollections is a library explicitly aimed at duplicating and outperforming Fastutil.
 
 **Source**: [Speiger/Primitive-Collections](https://github.com/Speiger/Primitive-Collections)  
 **Maven**: `io.github.speiger:Primitive-Collections:1.0.0`  
@@ -668,6 +668,7 @@ return h ^ (h >>> 16)
 
 * No CPU pinning, ran on idle machine.
 * 6 Core AMD Ryzen 5 9600X - Windows 11
+* L1/2/3 Cache Sizes: 48KB/core, 1MB/core, 32MB shared
 
 Benchmarks were run until standard deviation to mean ratios were at a reasonable level (where possible - there were a
 few benchmarks that still did not converge nicely after a reasonable number of re-runs), then median was used to
@@ -689,7 +690,8 @@ unfairly advantage some implementations. Load factors have become an important p
 valid choice to use a low load factor for performance and recover memory in other ways (by ensuring the load factor
 only affects the smaller metadata array and packing keys/value tightly outside the main array for example). However, 
 none of the hashtables benchmarked here appear to be applying any such memory optimizations, and in the interest of 
-similar comparisons we try to enforce that every hashtable has a load factor of at least 75%.
+similar comparisons we try to enforce that every hashtable has a load factor of at least 75% (higher is allowed). 
+Eclipse does not allow for load factor adjustments, and remains at 50%.
 
 | Library              | Default | Benchmarked | Adjustable |
 |----------------------|---------|-------------|------------|
@@ -782,6 +784,18 @@ Double-clicking a graph will reset its pan/zoom.
 
 Rather than forcing you to scroll past the excessive graphs and numbers below which go into individual scenarios, 
 might as well cut to the chase, right?
+
+{{< benchmark-chart benchmark="Map.readGM" order="random" title="Map Read Geometric Mean — random keys" >}}
+
+{{< benchmark-chart benchmark="Map.readGM" order="lowBits" title="Map Read Geometric Mean — lowBits keys" >}}
+
+{{< benchmark-chart benchmark="Map.readGM" order="highBits" title="Map Read Geometric Mean — highBits keys" >}}
+
+{{< benchmark-chart benchmark="Map.writeGM" order="random" title="Map Write Geometric Mean — random keys" >}}
+
+{{< benchmark-chart benchmark="Map.writeGM" order="lowBits" title="Map Write Geometric Mean — lowBits keys" >}}
+
+{{< benchmark-chart benchmark="Map.writeGM" order="highBits" title="Map Write Geometric Mean — highBits keys" >}}
 
 ### AndroidX Timeouts + Performance Cliff
 
