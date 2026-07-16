@@ -31,7 +31,7 @@
   }
 
   window.__benchmarkCsvPromise = window.__benchmarkCsvPromise ||
-    fetch('/libraries.csv').then(function (r) { return r.text(); });
+    fetch('/libraries.csv', { cache: 'no-cache' }).then(function (r) { return r.text(); });
 
   window.__benchmarkDataPromise = window.__benchmarkDataPromise || window.__benchmarkCsvPromise.then(function (csv) {
     var lines = csv.split(/\r?\n/);
