@@ -6,6 +6,13 @@
     position: relative;
     width: 100%;
     aspect-ratio: 2 / 1;
+    min-height: 320px;
+}
+
+@media only screen and (max-width: 680px) {
+    .benchmark-chart-canvas {
+        aspect-ratio: 1 / 1;
+    }
 }
 
 .benchmark-chart-wrap canvas {
