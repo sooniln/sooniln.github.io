@@ -772,7 +772,7 @@ hashtables that use tombstones for removal can have the tombstones substantially
 performed no benchmarking of removal + lookup scenarios. There are many other scenarios that could affect performance
 that were also uncovered in any benchmarking - it's impossible to cover everything.
 
-## Benchmark Results
+## Benchmarks
 
 Raw benchmark results can be downloaded [here](/libraries.csv).
 
@@ -868,6 +868,39 @@ Again, similar patterns for lowBits in writes from reads. Trove performs better 
 And for highBits keys we see the same patterns for AndroidX and HPPC, awful performance, especially at lower sizes. 
 Fastutil and PrimitiveCollections show the same degradation, just not as bad.
 
+#### Iteration Performance
+
+Since iteration is agnostic to actual key values, it is simply the geometric mean of Int and Long keyed maps.
+
+{{< benchmark-chart benchmark="Map.forEachGM" title="Int → Int / forEach" >}}
+
+From roughly ~16K entries onwards, JRE iteration is slower than every other library - a direct consequence of it 
+using more memory. Accessing more memory in a linear fashion takes more time - no two ways about it. Without 
+investigation, it's difficult to say why JRE iteration is competitive for fewer entries, but I would tend to assume 
+cache effects?
+
+On the opposite side, AndroidX has by far the fastest iteration up to ~16K entries - this is almost certainly due to 
+the fact that skipping empty slots only requires touching the much smaller metadata array for AndroidX. If the keys 
+and values arrays can fit in cache, iteration is certainly faster.
+
+HPPC however has surprisingly slow iteration... This is a consequence of a design decision HPPC has made to prevent the
+user from shooting themselves in the foot with naive copy operations. Most of these maps iterate in the same order 
+as elements appear in the backing array via their hashcode, which means iteration indirectly exposes hash order. 
+Inserting elements in hash order can be a worst case scenario and
+[cause quadratic runtimes](https://accidentallyquadratic.tumblr.com/post/153545455987/rust-hash-iteration-reinsertion)
+(but the amelioration is also generally trivial, simply pre-size the map appropriately). In order to prevent 
+potentially quadratic runtimes from occurring, HPPC uses a random step length for iteration - iteration no longer 
+exposes hash ordering, but is also now not very cache friendly and thus is slower. Many of the other libraries 
+benchmarked here suffer the same problem, but generally ignore it and allow the user to shoot themselves in the foot 
+if they aren't careful with proper pre-sizing so that iteration is not artificially slowed.
+
+Indeed, FastCollect suffers the same problem as well, but takes a slightly different approach. The Robin Hood invariant
+maintained in the map means we can expect reasonable upper bounds on run length for various map sizes. If 
+FastCollect detects pathologically long run lengths that should never be expected under any normal scenario, it will
+pre-emptively resize the map larger, ameliorating quadratic runtimes. This adds slightly more complex logic to 
+detect longer run lengths during insertion, but correct branch prediction minimizes the cost of this and still 
+allows a fast iteration implementation.
+
 #### Takeaways
 
 Overall primitive maps deliver a large amount of memory savings, and in some, but not all cases, a reasonable 
@@ -875,26 +908,7 @@ performance improvement as well. While JRE maps can be competitive for reads com
 behind for writes. Whether to switch, and which library to use is likely entirely dependent on your real usage
 patterns.
 
-So far we haven't discussed iteration or copying at all, so let's take a look at two representative graphs from the 
-[All Results](#all-results) section below. Let's start with iteration speed:
 
-{{< benchmark-chart benchmark="IntMap.forEach" title="Int → Int / forEach" >}}
-
-JRE iteration is obviously much slower than every other library - a direct consequence of how much more memory it 
-uses. Accessing more memory in a linear fashion takes more time - no two ways about it. HPPC also has surprisingly 
-slow iteration... This is a consequence of a design decision HPPC has made to prevent the user from shooting 
-themselves in the foot with naive copy operations. Most of these maps iterate in the same order as elements appear 
-in the backing array via their hashcode, which means iteration indirectly exposes hash order. Inserting elements in 
-hash order is generally a worst case scenario, and can cause quadratic runtimes (but the fix is also generally 
-trivial, simply pre-size the map appropriately). In order to prevent this, HPPC inserts a random step in iteration -
-iteration no longer exposes hash ordering, but is also now not very cache friendly and thus is slower. Many of the 
-other libraries suffer the same problem, but generally ignore it and allow the user to shoot themselves in the foot 
-if they aren't careful with proper pre-sizing so that iteration is not artificially slowed.
-
-FastCollect suffers the same problem as well, but takes a slightly different approach. The Robin Hood invariant 
-maintained in the map means we can expect reasonable upper bounds on run length for various map sizes. If 
-FastCollect detects pathologically long run lengths that should never be expected under any normal scenario, it will 
-pre-emptively resize the map larger, thus pathologically quadratic cases.
 
 Since we've just discussed naive copy scenarios in some detail, let's look instead at pre-allocated copy performance 
 next:
@@ -920,7 +934,7 @@ a custom build).
 {{< benchmark-chart benchmark="MapLF50.readGM" order="random" title="50% LF Map Read Geometric Mean — random keys" >}}
 
 With all libraries at 50% load factor, Eclipse is now solidly middle of the pack for read performance, and
-FastCollect is now the de-facto fastest by a small margin. Load factor was indeed the driving reason behind
+FastCollect is now the fastest by a small margin. We can conclude that load factor was indeed the driving reason behind 
 Eclipse's performance.
 
 ### AndroidX Oddities
@@ -976,12 +990,12 @@ int hash(int key) {
 key         = 11011000000000000000000000000000
 hash        = 01011000000000000000000000000000
 slot        = 0 // 0101100000000000000000000 & 1111 (table size is 16 in this example)
-fingerprint = 0
+fingerprint = 0000000
 
 key         = 01010110000000000000000000000000
 hash        = 00110110000000000000000000000000
 slot        = 0 // 0011011000000000000000000 & 1111 (table size is 16 in this example)
-fingerprint = 0
+fingerprint = 0000000
 ```
 
 Note that the hash function has barely changed the key at all - the multiplication is not terribly effective as 
@@ -1013,85 +1027,88 @@ h = h ^ (h >>> 32)
 return (int) (h ^ (h >>> 16)) // second fold shifts entropy lower
 ```
 
-### All Results
+HPPC's lack of an additional fold to spread entropy downwards leads to substantially worse performance for Long maps 
+on highBits keys, and this is visible in the end geometric mean results.
+
+## All Results
 
 At this point, the only thing left is all the raw benchmarking results - feel free to continue scrolling if those 
 are of interest, otherwise there's nothing more to read.
 
-#### Int → Int / getHit
+### Int → Int / getHit
 
 {{< benchmark-chart benchmark="IntMap.getHit" order="random" title="Int → Int / getHit — random keys" >}}
 {{< benchmark-chart benchmark="IntMap.getHit" order="lowBits" title="Int → Int / getHit — lowBits keys" >}}
 {{< benchmark-chart benchmark="IntMap.getHit" order="highBits" title="Int → Int / getHit — highBits keys" >}}
 
-#### Int → Int / getMiss
+### Int → Int / getMiss
 
 {{< benchmark-chart benchmark="IntMap.getMiss" order="random" title="Int → Int / getMiss — random keys" >}}
 {{< benchmark-chart benchmark="IntMap.getMiss" order="lowBits" title="Int → Int / getMiss — lowBits keys" >}}
 {{< benchmark-chart benchmark="IntMap.getMiss" order="highBits" title="Int → Int / getMiss — highBits keys" >}}
 
-#### Int → Int / putHit
+### Int → Int / putHit
 
 {{< benchmark-chart benchmark="IntMap.putHit" order="random" title="Int → Int / putHit — random keys" >}}
 {{< benchmark-chart benchmark="IntMap.putHit" order="lowBits" title="Int → Int / putHit — lowBits keys" >}}
 {{< benchmark-chart benchmark="IntMap.putHit" order="highBits" title="Int → Int / putHit — highBits keys" >}}
 
-#### Int → Int / putMiss
+### Int → Int / putMiss
 
 {{< benchmark-chart benchmark="IntMap.putMiss" order="random" title="Int → Int / putMiss — random keys" >}}
 {{< benchmark-chart benchmark="IntMap.putMiss" order="lowBits" title="Int → Int / putMiss — lowBits keys" >}}
 {{< benchmark-chart benchmark="IntMap.putMiss" order="highBits" title="Int → Int / putMiss — highBits keys" >}}
 
-#### Int → Int / removeAndPutMiss
+### Int → Int / removeAndPutMiss
 
 {{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="random" title="Int → Int / removeAndPutMiss — random keys" >}}
 {{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="lowBits" title="Int → Int / removeAndPutMiss — lowBits keys" >}}
 {{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="highBits" title="Int → Int / removeAndPutMiss — highBits keys" >}}
 
-#### Int → Int / forEach
+### Int → Int / forEach
 
 {{< benchmark-chart benchmark="IntMap.forEach" title="Int → Int / forEach" >}}
 
-#### Int → Int / naiveCopy + preAllocatedCopy
+### Int → Int / naiveCopy + preAllocatedCopy
 
 {{< benchmark-chart benchmark="IntMap.naiveCopy" title="Int → Int / naiveCopy" >}}
 {{< benchmark-chart benchmark="IntMap.preAllocatedCopy" title="Int → Int / preAllocatedCopy" >}}
 
-#### Long → Int / getHit
+### Long → Int / getHit
 
 {{< benchmark-chart benchmark="LongMap.getHit" order="random" title="Long → Int / getHit — random keys" >}}
 {{< benchmark-chart benchmark="LongMap.getHit" order="lowBits" title="Long → Int / getHit — lowBits keys" >}}
 {{< benchmark-chart benchmark="LongMap.getHit" order="highBits" title="Long → Int / getHit — highBits keys" >}}
 
-#### Long → Int / getMiss
+### Long → Int / getMiss
 
 {{< benchmark-chart benchmark="LongMap.getMiss" order="random" title="Long → Int / getMiss — random keys" >}}
 {{< benchmark-chart benchmark="LongMap.getMiss" order="lowBits" title="Long → Int / getMiss — lowBits keys" >}}
 {{< benchmark-chart benchmark="LongMap.getMiss" order="highBits" title="Long → Int / getMiss — highBits keys" >}}
 
-#### Long → Int / putHit
+### Long → Int / putHit
 
 {{< benchmark-chart benchmark="LongMap.putHit" order="random" title="Long → Int / putHit — random keys" >}}
 {{< benchmark-chart benchmark="LongMap.putHit" order="lowBits" title="Long → Int / putHit — lowBits keys" >}}
 {{< benchmark-chart benchmark="LongMap.putHit" order="highBits" title="Long → Int / putHit — highBits keys" >}}
 
-#### Long → Int / putMiss
+### Long → Int / putMiss
 
 {{< benchmark-chart benchmark="LongMap.putMiss" order="random" title="Long → Int / putMiss — random keys" >}}
 {{< benchmark-chart benchmark="LongMap.putMiss" order="lowBits" title="Long → Int / putMiss — lowBits keys" >}}
 {{< benchmark-chart benchmark="LongMap.putMiss" order="highBits" title="Long → Int / putMiss — highBits keys" >}}
 
-#### Long → Int / removeAndPutMiss
+### Long → Int / removeAndPutMiss
 
 {{< benchmark-chart benchmark="LongMap.removeAndPutMiss" order="random" title="Long → Int / removeAndPutMiss — random keys" >}}
 {{< benchmark-chart benchmark="LongMap.removeAndPutMiss" order="lowBits" title="Long → Int / removeAndPutMiss — lowBits keys" >}}
 {{< benchmark-chart benchmark="LongMap.removeAndPutMiss" order="highBits" title="Long → Int / removeAndPutMiss — highBits keys" >}}
 
-#### Long → Int / forEach
+### Long → Int / forEach
 
 {{< benchmark-chart benchmark="LongMap.forEach" title="Long → Int / forEach" >}}
 
-#### Long → Int / naiveCopy + preAllocatedCopy
+### Long → Int / naiveCopy + preAllocatedCopy
 
 {{< benchmark-chart benchmark="LongMap.naiveCopy" title="Long → Int / naiveCopy" >}}
 {{< benchmark-chart benchmark="LongMap.preAllocatedCopy" title="Long → Int / preAllocatedCopy" >}}
