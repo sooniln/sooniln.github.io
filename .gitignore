@@ -6,6 +6,7 @@ resources/_gen
 
 ### IntelliJ IDEA ###
 .idea/
+.idea/vcs.xml
 
 ### Mac OS ###
 .DS_Store
