@@ -13,22 +13,23 @@ library:
 ## Introduction
 
 Hashtables are one of the building blocks of computer science, and deservedly get a lot of attention - but less so
-within the JVM ecosystem. Part of this may simply be that most Java code is not written with performance top of mind,
+within the JVM ecosystem. Part of this may simply be that most JVM code is not written with performance top of mind,
 or that the default JRE implementation is all-around quite reasonable - efficient, resistant against attacks, why 
 fix it if it ain't broke? We're interested in squeezing out every last byte and cycle of performance however, and 
-that means we want to focus on primitive maps.
+that means here we're focusing on primitive hashtables.
 
-Using values rather than references means we'll entirely ignore the cost of heap allocation, pointer dereferencing, 
-lower GC pressure, and also come up with an analysis that will hopefully continue to hold weight with upcoming
-[Valhalla](https://openjdk.org/projects/valhalla/) changes to the JVM.
+If you need a hashtable with primitive keys and/or values, the default JRE HashMap will certainly work fine, but it's 
+hardly as efficient as it could be since it deals exclusively with references, which means boxing all your values.
+Using values rather than references means we can entirely ignore the costs of heap allocation and pointer 
+dereferencing, lower GC pressure, and hopefully come up with an analysis that will continue to hold weight with
+upcoming [Valhalla](https://openjdk.org/projects/valhalla/) changes to the JVM.
 
 Hashtables that store values rather than references can provide a range of large performance benefits within the JVM,
-such as no boxing, no pointer indirection, better cache locality, and so forth... The JVM ecosystem has accumulated a 
-handful of libraries that address this by providing hashtables backed by primitive arrays. The problem is that the 
-performance tradeoffs and design choices between them are neither obvious nor well-documented anywhere. Many 
-different choices are made around hash functions, collision resolution strategies, load factors, and those choices 
-produce meaningfully different performance profiles yet there is pretty much no data available on head-to-head 
-performance.
+and to that end the JVM ecosystem has accumulated a handful of libraries that address this by providing hashtables 
+backed by primitive arrays. The problem is that the performance tradeoffs and design choices between them are neither
+obvious nor well-documented anywhere. Many different choices are made around hash functions, collision resolution 
+strategies, load factors, and those choices produce meaningfully different performance profiles yet there is pretty 
+much no data available on head-to-head performance. Let's rectify that.
 
 We'll benchmark and analyze the following libraries (links go to more detailed information lower down this page):
 
@@ -44,24 +45,24 @@ We'll benchmark and analyze the following libraries (links go to more detailed i
 * [PrimitiveCollections](#primitivecollections)
 
 You may note that several of the libraries benchmarked here are quite old and/or no longer maintained. Others are 
-not intended for general purpose usage. The larger purpose of this post is not to determine which is fastest, but to 
-investigate the design choices that affect hashtable performance. Also note that the JRE is the only library here 
-truly suited for external use (when an attacker can control the table) - most of these libraries have abandoned any 
-pretense at resisting DoS attacks in favor of raw performance.
+not intended for general purpose usage. The larger purpose of this post is not to determine which is all-around 
+fastest, but to investigate the design choices that affect hashtable performance. Also note that the JRE is the only 
+library here truly suited for external use (when an attacker can control the table) - most of these libraries have 
+abandoned any pretense at resisting DoS attacks in favor of raw performance.
 
-Full benchmarking code is available at https://github.com/sooniln/jvm-collections-benchmarks.
+Before we begin, we'll start with a quick refresher of how hashtables work, and the design choices that go into them.
+If you feel sufficiently familiar with hashtable operations, feel free to skip directly to the
+[Benchmark Setup](#benchmark-setup) section.
 
 ## Hashtable Design Choices
 
-Before we begin, it's worth starting with a quick refresher on how hash tables work, and the various design choices that
-have sprung up over the years. If you're already reasonably familiar with how hashtables work, feel free to skip 
-straight to the [Libraries Under Test](#libraries-under-test) section, or the [Benchmark Setup](#benchmark-setup).
-
-Pretty much all general purpose hashtables operate by mapping a very large universe of potential keys onto a much
-smaller number of available slots (represented by an in-memory data structure, almost always an array). As a trivial
-example, if we're using 32-bit integers as keys, we would need to map all the ~4 billion possible integers onto the much
-smaller array in memory (for example a 128 slot array perhaps, if we're only expecting to map 100 integers total). This
-is accomplished via [hash functions](https://en.wikipedia.org/wiki/Hash_function).
+So, before we begin, it's worth starting with a quick refresher on how hash tables work, and the various design choices 
+that have sprung up over the years. Pretty much all general purpose hashtables operate by mapping a very large 
+universe of potential keys onto a much smaller number of available slots (represented by an in-memory data structure,
+almost always an array). As a trivial example, if we're using 32-bit integers as keys, we would need to map all the 
+~4 billion possible integers onto the much smaller array in memory (for example a 128 slot array perhaps, if we're 
+only expecting to map 100 integers total). This is accomplished via
+[hash functions](https://en.wikipedia.org/wiki/Hash_function).
 
 Now by definition, once we've computed such a mapping there may be collisions - two different keys that are mapped 
 by a hash function to the same slot. The second responsibility of the hashtable is thus to handle collisions, and
@@ -388,304 +389,28 @@ int hash(int k) {
 Knuth multiplicative hashing is only one hashing strategy however, and there exist many other possibilities, all 
 with their own lists of upsides and downsides.
 
-## Libraries Under Test
-
-### JRE
-
-Java's standard library hashtable uses separate chaining: each bucket holds a linked list that is automatically 
-promoted to a red-black tree once it grows too large, bounding worst-case lookup from O(n) to O(log n) per bucket 
-under adversarial key distributions. All keys are stored as boxed primitive objects on the heap; every key thus incurs
-an allocation and a pointer indirection on access.
-
-* **Storage Schema**: Power-of-two sized, array of node pointers holding boxed keys/values (can form a linked list or 
-  red-black tree)
-* **Probing Strategy**: Separate chaining (linked list/red-black tree)
-* **Deletion Strategy**: Removal from linked list/red-black tree
-* **Default Load Factor**: 75%
-
-**Integer key hash finalizer**: The hash finalizer performs minimal mixing, relying on the red-black tree fallback 
-behavior to prevent pathological lookups.
-
-```java
-return key ^ (key >>> 16)
-```
-
-### FastCollect
-
-*Disclosure: I am the author of FastCollect.*
-
-FastCollect is a Kotlin Multiplatform primitive collections library supporting JVM, JS, and native targets. The map 
-implementation currently uses Robin Hood hashtables because I wanted to play around with them.
-
-**Source**: [sooniln/fastcollect](https://github.com/sooniln/fastcollect)  
-**Maven**: `io.github.sooniln:fastcollect-kotlin-jvm:2.0.2`  
-**Last release**: June 2026
-
-* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
-* **Probing Strategy**: Linear probing (Robin Hood)
-* **Removal Strategy**: Backwards-shift deletion
-* **Default Load Factor**: 83.3% (100% for very small tables)
-
-**Integer key hash finalizer**: FastCollect takes a different approach to multiplicative hashing than most of the 
-other libraries benchmarked. Several of the other libraries all use the same hash finalizer (which appears to have 
-originally come from the Koloboke library many years ago - `(h * PHI) ^ ((h * PHI) >>> 16)`). It seems worth 
-revisiting this finalizer as it exhibits several poor qualities that can be improved upon. While it is cheap, the 
-multiplication concentrates entropy in the high bits, yet it is only the low bits that will be used to derive the 
-slot. Some effort is made to ameliorate this with the xor-shift, but it is generally insufficient. This finalizer 
-exhibits worse results when given non-random inputs.
-
-For the FastCollect finalizer the key realization is that simply reversing the order of bits in the multiplication 
-result puts the most entropy exactly where we want it, in the low bits. The problem is that while bit-reversal is a 
-single instruction (RBIT) on ARM, x86-64 does not have a similar instruction. Divide and conquer + BSWAP approaches 
-and similar can make bit-reversal reasonably cheap, but not single cycle cheap like RBIT. Since benchmarking is 
-occurring on x86-64 we choose a slightly different approach: premix bits, multiply by PHI, and then reverse the 
-bytes (not bits) with BSWAP/REV.
-
-```java
-var h = (key ^ (key >>> 16)) * 0x9E3779B9  // PHI
-return Integer.reverseBytes(h)
-```
-
-It would be very interesting to look into RBIT finalizers more on ARM platforms, it seems a much cheaper way of 
-achieving higher levels of entropy in a targeted part of the bit pattern, rather than focusing on achieving even 
-levels of entropy in all parts of the pattern (as more complex functions like murmur3, etc... appear to do). I am not 
-aware of any hashtable implementations that have experimented with this, and it could be there are hidden weaknesses 
-to this approach that I am not aware of.
-
-### Fastutil
-
-One of the most comprehensive and widely-adopted JVM primitive collections libraries, Fastutil is very well known.
-
-**Source**: [vigna/fastutil](https://github.com/vigna/fastutil)  
-**Maven**: `it.unimi.dsi:fastutil:8.5.18`  
-**Last release**: October 2025
-
-* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
-* **Probing Strategy**: Linear probing
-* **Removal Strategy**: Backwards-shift deletion
-* **Default Load Factor**: 75%
-
-**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
-
-```java
-var h = key * 0x9E3779B9
-return h ^ (h >>> 16)
-```
-
-### AndroidX
-
-Google's Jetpack collection utilities library, now written in Kotlin and available as a Kotlin Multiplatform artifact.
-The implementation is a Swiss Table design that uses SWAR (SIMD within a register) techniques to evaluate groups
-of 8 entries at a time. AndroidX libraries are primarily intended for arm64, though they are distributed as 
-multi-platform. Since benchmarks were run on amd64, care should be taken not to generalize the results.
-
-**Source**: [android.googlesource.com](https://android.googlesource.com/platform/frameworks/support) ([GitHub mirror](https://github.com/androidx/androidx))  
-**Website**: [developer.android.com/jetpack/androidx/releases/collection](https://developer.android.com/jetpack/androidx/releases/collection)  
-**Maven**: `androidx.collection:collection-jvm:1.6.0`  
-**Last release**: March 2026
-
-* **Storage Schema**: Power-of-two sized, metadata array of 1 byte/entry, parallel arrays for keys/values
-  * **Metadata Schema**: Stores low 7 bits of original hash as the metadata fingerprint, the high 25 bits are used to
-    drive the probe offset
-* **Probing Strategy**: Quadratic Probing (where each probe checks a group of 8 linear entries)
-* **Removal Strategy**: Tombstones + rehash to remove tombstones at ~78% capacity
-* **Default Load Factor**: 87.5%
-
-**Integer key hash finalizer**: Murmur3 finalizer. Note that the left shift instead of right shift would seem to
-concentrate hash entropy further in the upper bits. This makes some sense for the Swiss Table design, where the 
-initial probe position is calculated from the high bits and the fingerprint is derived from the low bits. But this 
-opens up the risk of perhaps too little entropy in the low bits and thus the fingerprint (see benchmarking results for 
-highBits order)...
-
-```java
-var h = key * 0xCC9E2D51 // MurmurHashC1
-return h ^ (h << 16)
-```
-
-### Trove
-
-GNU Trove uses prime sizing and open addressing with double hashing: rather than a fixed linear step, each key 
-computes a secondary probe stride from its primary hash, so colliding keys scatter along independent paths and form 
-shorter clusters than linear probing would.
-
-**Source**: [bitbucket.org/trove4j/trove](https://bitbucket.org/trove4j/trove)  
-**Maven**: `net.sf.trove4j:core:3.1.0`  
-**Last release**: August 2018 (due to module split - no active development since ~2012 apparently)
-
-* **Storage Schema**: Prime sized, metadata array to track slot empty state + parallel arrays for keys/values
-    * **Metadata Schema**: Only tracks empty state, which means every probe step has to check both metadata array and
-      key arrays - would expect this to hurt performance.
-* **Probing Strategy**: Double hashing
-* **Removal Strategy**: Tombstones, rehash if there are no free slots (only tombstones) left, also rehash if removal 
-  allows backing array to shrink to the previous prime size
-* **Default Load Factor**: 50%
-
-**Integer key hash finalizer**: The identity hash — no bit mixing is applied; distribution quality relies entirely on
-the double-hashing probe and prime sized arrays to counteract clustering.
-
-```java
-// double hashing
-// slot - identity hash
-return key
-
-// stride
-return 1 + (key % (length - 2))
-```
-
-### Koloboke
-
-A high performance collections library from Roman Leventov, appears to have been designed with HFT in mind. It makes
-use of deprecated Unsafe APIs for performance.
-
-**Source**: [leventov/Koloboke](https://github.com/leventov/Koloboke)
-**Maven**: `com.koloboke:koloboke-impl-jdk8:1.0.0`  
-**Last release**: May 2016
-
-* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
-* **Probing Strategy**: Linear probing
-* **Removal Strategy**: Backwards-shift deletion
-* **Default Load Factor**: 66.7%
-
-**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
-
-```java
-var h = key * 0x9E3779B9 // PHI
-return h ^ (h >>> 16)
-```
-
-### Eclipse
-
-Originally the Goldman Sachs Collections library, donated to the Eclipse Foundation in 2012. Eclipse forces a load 
-factor of 50% - much lower than any other library in this benchmark - and it cannot be adjusted. Beware assuming 
-an apples to apples comparison. Some experimentation with running other libraries with a 50% load factor indicates 
-they are competitive and may outperform Eclipse, but full benchmarking has not been performed.
-
-**Source**: [eclipse/eclipse-collections](https://github.com/eclipse/eclipse-collections)  
-**Website**: [eclipse.dev/collections](https://eclipse.dev/collections/)  
-**Maven**: `org.eclipse.collections:eclipse-collections:13.0.0`  
-**Last release**: December 24, 2024
-
-* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
-* **Probing Strategy**: Combination (linear probing on hash1 for half a cache line → linear probing on hash2 for 
-  half a cache line → double hashing)
-* **Removal Strategy**: Tombstones - tombstones count towards rehashing load factor
-* **Default Load Factor**: 50%
-
-**Integer key hash finalizer**: 3 separate hash finalizers for the various probing steps. It's not entirely clear where 
-the constants come from.
-
-```java
-// hash1 - identity hash
-return key
-
-// hash2 - murmur3 style finalizer
-var h = key ^ (key >>> 14)
-h *= 0xBA1CCD33
-h ^= h >>> 13
-h *= 0x9B6296CB
-return h ^ (h >>> 12)
-
-// double hashing
-// slot
-var h = key ^ (key >>> 15)
-h *= 0xACAB2A4D
-h ^= h >>> 15
-h *= 0x5CC7DF53
-return h ^ (h >>> 12)
-
-// stride - odd stride ensures every slot is hit with power-of-two sized array
-return Integer.reverse(hash2(key)) | 1
-```
-
-### HPPC
-
-High Performance Primitive Collections, maintained by Carrot Search.
-
-**Source**: [carrotsearch/hppc](https://github.com/carrotsearch/hppc)  
-**Website**: [labs.carrotsearch.com/hppc.html](https://labs.carrotsearch.com/hppc.html)  
-**Maven**: `com.carrotsearch:hppc:0.10.0`  
-**Last release:** June 2024
-
-* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
-* **Probing Strategy**: Linear probing
-* **Removal Strategy**: Backwards-shift deletion
-* **Default Load Factor**: 75%
-
-**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
-
-```java
-var h = key * 0x9E3779B9 // PHI
-return h ^ (h >>> 16)
-```
-
-### Agrona
-
-Agrona is Real Logic's utility library, developed primarily to support the [Aeron](https://github.com/aeron-io/aeron)
-messaging system. Agrona requires that every map must have an unrepresentable value passed in on initialization (to 
-mark empty slots); thus Agrona is incapable of representing the full range of values.
-
-Note: Since Agrona does not have a Long → Int map, benchmarking uses Long → Long maps instead, and widens values. Be 
-wary of apples to apples comparisons.
-
-**Source**: [aeron-io/agrona](https://github.com/aeron-io/agrona)
-**Maven**: `org.agrona:agrona:2.4.1`  
-**Last release**: April 2026
-
-* **Storage Schema**: Power-of-two sized, interleaved arrays for keys/values (Agrona does not support keys and values 
-  with different sizes)
-* **Probing Strategy**: Linear probing
-* **Removal Strategy**: Backwards-shift deletion
-* **Default Load Factor**: 65%
-
-**Integer key hash finalizer**: Two-round XOR-shift/multiply from Chris Wellons' Hash Prospector.
-
-```java
-var h = key ^ (key >>> 16)
-h = h * 0x119DE1F3
-h = h ^ (h >>> 16)
-h = h * 0x119DE1F3
-return h ^ (h >>> 16)
-```
-
-### PrimitiveCollections
-
-PrimitiveCollections is a library explicitly aimed at duplicating and outperforming Fastutil.
-
-**Source**: [Speiger/Primitive-Collections](https://github.com/Speiger/Primitive-Collections)  
-**Maven**: `io.github.speiger:Primitive-Collections:1.0.0`  
-**Last release**: May 2026
-
-* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
-* **Probing Strategy**: Linear probing
-* **Removal Strategy**: Backwards-shift deletion
-* **Default Load Factor**: 75%
-
-**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
-
-```java
-var h = key * 0x9E3779B9 // PHI
-return h ^ (h >>> 16)
-```
-
 ## Benchmark Setup
 
 * No CPU pinning, ran on idle machine.
 * 6 Core AMD Ryzen 5 9600X - Windows 11
-* L1/2/3 Cache Sizes: 48KB/core, 1MB/core, 32MB shared
+* L1/L2/L3 Cache Sizes: 48KB/core, 1MB/core, 32MB shared
+* Temurin JDK 21.0.11, OpenJDK 64-Bit Server VM
 
-Benchmarks were run until standard deviation to mean ratios were at a reasonable level (where possible - there were a
-few benchmarks that still did not converge nicely after a reasonable number of re-runs), then median was used to
-score in order to avoid outliers.
+Benchmarks were run until standard deviation to mean ratios were at a reasonable level (usually < 15%), then the median 
+was used to score in order to avoid outliers.
 
 Two types of maps tested:
 
 Integer → Integer
 * Same size for keys/values allows for interleaved memory layouts without penalty.
 * Smaller keys pack more into cache.
+* 32-bit keys are likely the most common in production.
 
 Long → Integer
 * Different size for keys/values prevents interleaved layouts.
 * Larger keys increase cache pressure.
+* 64-bit keys are likely the second most common in production (it seems unlikely that byte/short keyed hashtables 
+  are very common).
 
 The hashtables under test come with a variety of different default load factors. We face a choice of whether to try and
 force similar load factors for a more apples-to-apples comparison, or use the default load factors which may 
@@ -694,7 +419,8 @@ valid choice to use a low load factor for performance and recover memory in othe
 only affects the smaller metadata array and packing keys/value tightly outside the main array for example). However, 
 none of the hashtables benchmarked here appear to be applying any such memory optimizations, and in the interest of 
 similar comparisons we try to enforce that every hashtable has a load factor of at least 75% (higher is allowed). 
-Eclipse does not allow for load factor adjustments, and remains at 50%.
+There is one exception - Eclipse does not allow for load factor adjustments, and remains at 50%. We dig into the 
+performance implications of this later.
 
 | Library              | Default | Benchmarked | Adjustable |
 |----------------------|---------|-------------|------------|
@@ -714,17 +440,17 @@ Eclipse does not allow for load factor adjustments, and remains at 50%.
 Because hash functions have such a large effect on the performance of hash tables, it's important to test with data 
 that can represent real world scenarios. We specify 3 key orders to test under:
 
-* **random**: Keys are selected at random from the entire universe of possible keys. This represents scenarios where
-  only a subset of keys are stored - for example if a hashtable is being used as a cache.
+* **random**: Keys are selected at random from the entire universe of possible keys. This might represent a scenario 
+  where only a subset of keys are stored - for example if a hashtable is being used as a cache.
 * **lowBits**: Keys are selected from 0 → table size and shuffled randomly. This has the effect that only the least 
-  significant bits of the key tend to be set, and most significant bits are all zero. This represents scenarios where 
-  keys are generally linear and almost all keys are stored - for example internal id values.
+  significant bits of the key tend to be set, and most significant bits are all zero. This might represent a scenario 
+  where keys are generally linear and almost all keys are stored - for example internal id values.
 * **highBits**: The same as lowBits, but every key is bit-reversed, so that the most significant bits tend to be set,
   and the least significant are all zero. This represents two scenarios - (1) an easy adversarial attack (since the 
   vast majority of hashtables are power-of-two sized, we know that they will usually truncate high bits in order to 
   calculate a slot - without good bit-mixing properties these tables may be vulnerable) (2) structures that have been 
-  bit-packed into keys and thus have unusually structured bits (for example, a Point class can trivially be encoded as 
-  a 64-bit value).
+  bit-packed into keys and thus have unusually structured bits (for example, a Point class might be trivially 
+  encoded as a 64-bit value).
 
 In practice, I suspect (with no evidence other than gut feeling) that random and lowBits are likely to represent the 
 majority of real-world scenarios in the JVM ecosystem.
@@ -775,6 +501,285 @@ hashtables that use tombstones for removal can have the tombstones substantially
 performed no benchmarking of removal + lookup scenarios. There are many other scenarios that could affect performance
 that were also uncovered in any benchmarking - it's impossible to cover everything.
 
+### Libraries Under Test
+
+#### JRE
+
+Java's standard library hashtable uses separate chaining: each bucket holds a linked list that is automatically
+promoted to a red-black tree once it grows too large, bounding worst-case lookup from O(n) to O(log n) per bucket
+under adversarial key distributions. All keys are stored as boxed primitive objects on the heap; every key thus incurs
+an allocation and a pointer indirection on access.
+
+* **Storage Schema**: Power-of-two sized, array of node pointers holding boxed keys/values (can form a linked list or
+  red-black tree)
+* **Probing Strategy**: Separate chaining (linked list/red-black tree)
+* **Deletion Strategy**: Removal from linked list/red-black tree
+* **Default Load Factor**: 75%
+
+**Integer key hash finalizer**: The hash finalizer performs minimal mixing, relying on the red-black tree fallback
+behavior to prevent pathological lookups.
+
+```java
+return key ^ (key >>> 16);
+```
+
+#### FastCollect
+
+*Disclosure: I am the author of FastCollect.*
+
+FastCollect is a Kotlin Multiplatform primitive collections library supporting JVM, JS, and native targets. The map
+implementation currently uses Robin Hood hashtables because I wanted to play around with them.
+
+**Source**: [sooniln/fastcollect](https://github.com/sooniln/fastcollect)  
+**Maven**: `io.github.sooniln:fastcollect-kotlin-jvm:2.0.2`  
+**Last release**: June 2026
+
+* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
+* **Probing Strategy**: Linear probing (Robin Hood)
+* **Removal Strategy**: Backwards-shift deletion
+* **Default Load Factor**: 83.3% (100% for very small tables)
+
+**Integer key hash finalizer**: FastCollect takes a different approach to multiplicative hashing than most of the
+other libraries benchmarked. Several of the other libraries all use the same hash finalizer (which appears to have
+originally come from the Koloboke library many years ago - `(h * PHI) ^ ((h * PHI) >>> 16)`). It seems worth
+revisiting this finalizer as it exhibits several poor qualities that can be improved upon. While it is cheap, the
+multiplication concentrates entropy in the high bits, yet it is only the low bits that will be used to derive the
+slot. Some effort is made to ameliorate this with the xor-shift, but it is generally insufficient. This finalizer
+exhibits worse results when given non-random inputs.
+
+For the FastCollect finalizer the key realization is that simply reversing the order of bits in the multiplication
+result puts the most entropy exactly where we want it, in the low bits. The problem is that while bit-reversal is a
+single instruction (RBIT) on ARM, x86-64 does not have a similar instruction. Divide and conquer + BSWAP approaches
+and similar can make bit-reversal reasonably cheap, but not single cycle cheap like RBIT. Since benchmarking is
+occurring on x86-64 we choose a slightly different approach: premix bits, multiply by PHI, and then reverse the
+bytes (not bits) with BSWAP/REV.
+
+```java
+var h = (key ^ (key >>> 16)) * 0x9E3779B9;  // PHI
+return Integer.reverseBytes(h);
+```
+
+It would be very interesting to look into RBIT finalizers more on ARM platforms, it seems a much cheaper way of
+achieving higher levels of entropy in a targeted part of the bit pattern, rather than focusing on achieving even
+levels of entropy in all parts of the pattern (as more complex functions like murmur3, etc... appear to do). I am not
+aware of any hashtable implementations that have experimented with this, and it could be there are hidden weaknesses
+to this approach that I am not aware of.
+
+#### Fastutil
+
+One of the most comprehensive and widely-adopted JVM primitive collections libraries, Fastutil is very well known.
+
+**Source**: [vigna/fastutil](https://github.com/vigna/fastutil)  
+**Maven**: `it.unimi.dsi:fastutil:8.5.18`  
+**Last release**: October 2025
+
+* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
+* **Default Load Factor**: 75%
+
+**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
+
+```java
+var h = key * 0x9E3779B9;
+return h ^ (h >>> 16);
+```
+
+#### AndroidX
+
+Google's Jetpack collection utilities library, now written in Kotlin and available as a Kotlin Multiplatform artifact.
+The implementation is a Swiss Table design that uses SWAR (SIMD within a register) techniques to evaluate groups
+of 8 entries at a time. AndroidX libraries are primarily intended for arm64, though they are distributed as
+multi-platform. Since benchmarks were run on amd64, care should be taken not to generalize the results.
+
+**Source**: [android.googlesource.com](https://android.googlesource.com/platform/frameworks/support) ([GitHub mirror](https://github.com/androidx/androidx))  
+**Website**: [developer.android.com/jetpack/androidx/releases/collection](https://developer.android.com/jetpack/androidx/releases/collection)  
+**Maven**: `androidx.collection:collection-jvm:1.6.0`  
+**Last release**: March 2026
+
+* **Storage Schema**: Power-of-two sized, metadata array of 1 byte/entry, parallel arrays for keys/values
+  * **Metadata Schema**: Stores low 7 bits of original hash as the metadata fingerprint, the high 25 bits are used to
+    drive the probe offset
+* **Probing Strategy**: Quadratic Probing (where each probe checks a group of 8 linear entries)
+* **Removal Strategy**: Tombstones + rehash to remove tombstones at ~78% capacity
+* **Default Load Factor**: 87.5%
+
+**Integer key hash finalizer**: Murmur3 finalizer. Note that the left shift instead of right shift would seem to
+concentrate hash entropy further in the upper bits. This makes some sense for the Swiss Table design, where the
+initial probe position is calculated from the high bits and the fingerprint is derived from the low bits. But this
+opens up the risk of perhaps too little entropy in the low bits and thus the fingerprint (see benchmarking results for
+highBits order)...
+
+```java
+var h = key * 0xCC9E2D51; // MurmurHashC1
+return h ^ (h << 16);
+```
+
+#### Trove
+
+GNU Trove uses prime sizing and open addressing with double hashing: rather than a fixed linear step, each key
+computes a secondary probe stride from its primary hash, so colliding keys scatter along independent paths and form
+shorter clusters than linear probing would.
+
+**Source**: [bitbucket.org/trove4j/trove](https://bitbucket.org/trove4j/trove)  
+**Maven**: `net.sf.trove4j:core:3.1.0`  
+**Last release**: August 2018 (due to module split - no active development since ~2012 apparently)
+
+* **Storage Schema**: Prime sized, metadata array to track slot empty state + parallel arrays for keys/values
+  * **Metadata Schema**: Only tracks empty state, which means every probe step has to check both metadata array and
+    key arrays - would expect this to hurt performance.
+* **Probing Strategy**: Double hashing
+* **Removal Strategy**: Tombstones, rehash if there are no free slots (only tombstones) left, also rehash if removal
+  allows backing array to shrink to the previous prime size
+* **Default Load Factor**: 50%
+
+**Integer key hash finalizer**: The identity hash — no bit mixing is applied; distribution quality relies entirely on
+the double-hashing probe and prime sized arrays to counteract clustering.
+
+```java
+// double hashing
+// slot - identity hash
+return key;
+
+// stride
+return 1 + (key % (length - 2));
+```
+
+#### Koloboke
+
+A high performance collections library from Roman Leventov, appears to have been designed with HFT in mind. It makes
+use of deprecated Unsafe APIs for performance.
+
+**Source**: [leventov/Koloboke](https://github.com/leventov/Koloboke)  
+**Maven**: `com.koloboke:koloboke-impl-jdk8:1.0.0`  
+**Last release**: May 2016
+
+* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
+* **Default Load Factor**: 66.7%
+
+**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
+
+```java
+var h = key * 0x9E3779B9; // PHI
+return h ^ (h >>> 16);
+```
+
+#### Eclipse
+
+Originally the Goldman Sachs Collections library, donated to the Eclipse Foundation in 2012. Eclipse forces a load
+factor of 50% - much lower than any other library in this benchmark - and it cannot be adjusted. Beware assuming
+an apples to apples comparison. Some experimentation with running other libraries with a 50% load factor indicates
+they are competitive and may outperform Eclipse, but full benchmarking has not been performed.
+
+**Source**: [eclipse/eclipse-collections](https://github.com/eclipse/eclipse-collections)  
+**Website**: [eclipse.dev/collections](https://eclipse.dev/collections/)  
+**Maven**: `org.eclipse.collections:eclipse-collections:13.0.0`  
+**Last release**: December 24, 2024
+
+* **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
+* **Probing Strategy**: Combination (linear probing on hash1 for half a cache line → linear probing on hash2 for
+  half a cache line → double hashing)
+* **Removal Strategy**: Tombstones - tombstones count towards rehashing load factor
+* **Default Load Factor**: 50%
+
+**Integer key hash finalizer**: 3 separate hash finalizers for the various probing steps. It's not entirely clear where
+the constants come from.
+
+```java
+// hash1 - identity hash
+return key;
+
+// hash2 - murmur3 style finalizer
+var h = key ^ (key >>> 14);
+h *= 0xBA1CCD33;
+h ^= h >>> 13;
+h *= 0x9B6296CB;
+return h ^ (h >>> 12);
+
+// double hashing
+// slot
+var h = key ^ (key >>> 15);
+h *= 0xACAB2A4D;
+h ^= h >>> 15;
+h *= 0x5CC7DF53;
+return h ^ (h >>> 12);
+
+// stride - odd stride ensures every slot is hit with power-of-two sized array
+return Integer.reverse(hash2(key)) | 1;
+```
+
+#### HPPC
+
+High Performance Primitive Collections, maintained by Carrot Search.
+
+**Source**: [carrotsearch/hppc](https://github.com/carrotsearch/hppc)  
+**Website**: [labs.carrotsearch.com/hppc.html](https://labs.carrotsearch.com/hppc.html)  
+**Maven**: `com.carrotsearch:hppc:0.10.0`  
+**Last release:** June 2024
+
+* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
+* **Default Load Factor**: 75%
+
+**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
+
+```java
+var h = key * 0x9E3779B9; // PHI
+return h ^ (h >>> 16);
+```
+
+#### Agrona
+
+Agrona is Real Logic's utility library, developed primarily to support the [Aeron](https://github.com/aeron-io/aeron)
+messaging system. Agrona requires that every map must have an unrepresentable value passed in on initialization (to
+mark empty slots); thus Agrona is incapable of representing the full range of values.
+
+Note: Since Agrona does not have a Long → Int map, benchmarking uses Long → Long maps instead, and widens values. Be
+wary of apples to apples comparisons.
+
+**Source**: [aeron-io/agrona](https://github.com/aeron-io/agrona)
+**Maven**: `org.agrona:agrona:2.4.1`  
+**Last release**: April 2026
+
+* **Storage Schema**: Power-of-two sized, interleaved arrays for keys/values (Agrona does not support keys and values
+  with different sizes)
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
+* **Default Load Factor**: 65%
+
+**Integer key hash finalizer**: Two-round XOR-shift/multiply from Chris Wellons' Hash Prospector.
+
+```java
+var h = key ^ (key >>> 16);
+h = h * 0x119DE1F3;
+h = h ^ (h >>> 16);
+h = h * 0x119DE1F3;
+return h ^ (h >>> 16);
+```
+
+#### PrimitiveCollections
+
+PrimitiveCollections is a library explicitly aimed at duplicating and outperforming Fastutil.
+
+**Source**: [Speiger/Primitive-Collections](https://github.com/Speiger/Primitive-Collections)  
+**Maven**: `io.github.speiger:Primitive-Collections:1.0.0`  
+**Last release**: May 2026
+
+* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
+* **Default Load Factor**: 75%
+
+**Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
+
+```java
+var h = key * 0x9E3779B9; // PHI
+return h ^ (h >>> 16);
+```
+
 ## Benchmarks
 
 Raw benchmark results can be downloaded [here](/libraries.csv).
@@ -788,8 +793,6 @@ Double-clicking a graph will reset its pan/zoom.
 Rather than forcing you to scroll past the excessive graphs and numbers below which go into individual scenarios, 
 might as well cut to the chase, right?
 
-For map iteration and copying benchmark results, find the relevant [All Results](#all-results) section.
-
 #### Memory Usage
 
 Memory usage is measured with the [JOL (Java Object Layout)](https://github.com/openjdk/jol) library. Note that when 
@@ -802,13 +805,13 @@ hide/show its data series.
 {{< benchmark-chart benchmark="IntMap.memory" title="Int → Int Map Memory Usage" yAxis="linear" >}}
 
 Results are pretty much as we'd expect - JRE maps which store objects take up 3-6.5x as much memory as maps which store
-primitives. The effects of prime sizing (Trove) vs power-of-two sizing (everyone else) and different load factors 
+primitives. The effects of prime sizing (Trove) vs power-of-two sizing (everyone else) and different load factors
 are also on display.
 
 {{< benchmark-chart benchmark="LongMap.memory" title="Long → Int Map Memory Usage" yAxis="linear" >}}
 
-Results are pretty much the same, except that Agrona now uses more memory (recall that as a special-purpose library 
-Agrona does not support Long → Int maps, and thus we use its Long → Long map instead).
+For Long maps results are relatively the same, except that Agrona now uses more memory (recall that as a 
+special-purpose library Agrona does not support Long → Int maps, and thus we use its Long → Long map instead).
 
 #### Read Performance
 
@@ -820,13 +823,14 @@ misses equally, an assumption which may not be true in various real world worklo
 
 As this is the first graph we're looking at, note the distinct regime changes as the hashtable size increases past
 L1/L2/L3 cache sizes. For many of the power-of-two sized graphs we see the distinct sawtooth performance that comes
-from different load factors as the table is queried when more empty vs more full (the sizes benchmarked were 
-explicitly chosen to differentiate this). Looking at AndroidX, we can note two things - (1) a more subdued change in 
-performance as size increases, and (2) it hits a performance cliff and times out around 32M entries. Further 
-analysis of AndroidX can be found later. We also note that JRE read performance is relatively competitive (although 
-it uses far more memory). Eclipse is the obvious fastest across all sizes - however how much of its performance is 
-due to the fact that it is using an unfairly (for comparison purposes) lower load factor? We'll dig into that later 
-as well.
+from different loads as the table is queried when more empty vs more full (the sizes benchmarked were explicitly
+chosen to differentiate this). Looking at AndroidX, we can note a couple things - (1) impressive read performance 
+from ~32K entries onwards - comparable with Eclipse operating at a much lower load factor (2) a more subdued change 
+in performance as size increases (thanks to a much smaller metadata array), and (3) it hits a performance cliff and 
+times out around 32M entries. Further analysis of AndroidX can be found later. We also note that JRE read 
+performance is relatively competitive (although it uses far more memory of course). Eclipse is the obvious fastest 
+across all sizes - however how much of its performance is due to the fact that it is using an unfairly lower (for 
+comparison purposes) load factor? We'll dig into that later as well.
 
 {{< benchmark-chart benchmark="Map.readGM" order="lowBits" title="Map Read Geometric Mean — lowBits keys" >}}
 
@@ -844,22 +848,22 @@ out. AndroidX and HPPC in particular show pathological performance degradation, 
 AndroidX managing to take ~1600ns on average for a lookup in the absolute worst case. Fastutil and PrimitiveCollections 
 also see performance taking a hit, though not to the same extreme factor. Interestingly, if we look at JRE 
 performance, it's possible that we're able to see the effect of JRE's red-black tree fallback ameliorating the 
-performance hit here (though I have not confirmed that). FastCollect performs sufficiently well with highBits keys 
-that it is able to out-perform even Eclipse, though Eclipse is operating at a load factor of 50% and FastCollect at
-83%.
+performance hit at larger sizes (though I have not confirmed that's what's actually happening here). FastCollect 
+performs sufficiently well with highBits keys that it is able to out-perform even Eclipse, though Eclipse is 
+operating at a load factor of 50% and FastCollect at 83%.
 
 #### Write Performance
 
 Write performance is calculated as the geometric mean of the PutHit, PutMiss, and RemoveAndPutMiss benchmarks. This 
-weights misses higher, as they are represented twice (PutMiss and RemoveAndPutMiss), an assumption which may not be 
-true in various real world workloads. Results for the three orderings (random, lowBits, highBits) follow:
+weights miss benchmarks higher, as they are represented twice (PutMiss and RemoveAndPutMiss), an assumption which may 
+not be true in various real world workloads. Results for the three orderings (random, lowBits, highBits) follow:
 
 {{< benchmark-chart benchmark="Map.writeGM" order="random" title="Map Write Geometric Mean — random keys" >}}
 
 We immediately see some patterns which look the same as from the read results, and note that AndroidX again hits a 
-performance cliff and times out at higher sizes. JRE is less competitive for write than reads it would also appear 
-here, and while Eclipse is again generally the fastest, it isn't as dominant as it was for reads (again with the 
-caveat that Eclipse is operating at a different load factor than all the other libraries).
+performance cliff and times out at higher sizes. JRE is less competitive for writes than reads it would also appear,
+and while Eclipse is again generally the fastest, it isn't as dominant as it was for reads (again with the caveat
+that Eclipse is operating at a different load factor than all the other libraries).
 
 {{< benchmark-chart benchmark="Map.writeGM" order="lowBits" title="Map Write Geometric Mean — lowBits keys" >}}
 
@@ -873,7 +877,7 @@ Fastutil and PrimitiveCollections show the same degradation, just not as bad.
 
 #### Iteration Performance
 
-Since iteration is agnostic to actual key values, it is simply the geometric mean of Int and Long keyed maps.
+Since iteration is agnostic to actual key values, it is simply the geometric mean of Int and Long keyed map iterations.
 
 {{< benchmark-chart benchmark="Map.forEachGM" title="Int → Int / forEach" >}}
 
@@ -883,56 +887,59 @@ investigation, it's difficult to say why JRE iteration is competitive for fewer 
 cache effects?
 
 On the opposite side, AndroidX has by far the fastest iteration up to ~16K entries - this is almost certainly due to 
-the fact that skipping empty slots only requires touching the much smaller metadata array for AndroidX. If the keys 
-and values arrays can fit in cache, iteration is certainly faster.
+the fact that skipping empty slots only requires touching the much smaller metadata array for AndroidX. Since it's 
+so much smaller, it's much easier for it to stay in cache, even at larger sizes. Once a non-empty slot is 
+reached however, AndroidX will still need to load from the key/value arrays.
 
-HPPC however has surprisingly slow iteration... This is a consequence of a design decision HPPC has made to prevent the
-user from shooting themselves in the foot with naive copy operations. Most of these maps iterate in the same order 
-as elements appear in the backing array via their hashcode, which means iteration indirectly exposes hash order. 
-Inserting elements in hash order can be a worst case scenario and
-[cause quadratic runtimes](https://accidentallyquadratic.tumblr.com/post/153545455987/rust-hash-iteration-reinsertion)
+HPPC however has unexpectedly slow iteration! This is a consequence of a design decision HPPC has made to prevent the
+user from shooting themselves in the foot with naive copy operations. Most of these libraries under test iterate in the 
+same order as elements appear in the key or metadata array via their hashcode, which means iteration indirectly exposes 
+hash order. If iteration order is then used for insertion again (for example copying every element into 
+another map), this can be a worst case scenario and 
+[lead to quadratic runtimes](https://accidentallyquadratic.tumblr.com/post/153545455987/rust-hash-iteration-reinsertion)
 (but the amelioration is also generally trivial, simply pre-size the map appropriately). In order to prevent 
 potentially quadratic runtimes from occurring, HPPC uses a random step length for iteration - iteration no longer 
 exposes hash ordering, but is also now not very cache friendly and thus is slower. Many of the other libraries 
 benchmarked here suffer the same problem, but generally ignore it and allow the user to shoot themselves in the foot 
 if they aren't careful with proper pre-sizing so that iteration is not artificially slowed.
 
-Indeed, FastCollect suffers the same problem as well, but takes a slightly different approach. The Robin Hood invariant
-maintained in the map means we can expect reasonable upper bounds on run length for various map sizes. If 
-FastCollect detects pathologically long run lengths that should never be expected under any normal scenario, it will
-pre-emptively resize the map larger, ameliorating quadratic runtimes. This adds slightly more complex logic to 
-detect longer run lengths during insertion, but correct branch prediction minimizes the cost of this and still 
-allows a fast iteration implementation.
+Indeed, FastCollect suffers the same problem as well (to an even greater degree, given that maintaining the Robin 
+Hood invariant requires extra work during insertion), but takes a slightly different approach. Any linear probing 
+approach means we can expect calculable upper bounds on maximum run length for various map sizes (while there are 
+indeed formulas to calculate this, see https://www.cs.tau.ac.il//~zwick/Adv-Alg-2015/Linear-Probing.pdf for more 
+information, I skipped that and simply used Monte Carlo simulations). I.e. given a map with a backing array of 
+length 65536 which is ~83.3% full, we would expect VERY roughly a maximum run length (consecutive non-empty slots) 
+of ~500 at the 99.9th percentile. So if we see a run length > 500 in a map of that size, it's extraordinarily likely
+that something is going drastically wrong. And further, if we're in the accidentally quadrative re-insertion 
+scenario discussed above, we'll likely encounter that warning after only ~500 elements - quite early in the 
+re-insertion! When FastCollect detects these pathologically long run lengths that should never be expected under any 
+normal scenario, it will pre-emptively resize the map larger, with the effect of ameliorating quadratic runtimes. This 
+adds slightly more complex logic to detect run lengths during insertion, but correct branch prediction minimizes the
+cost of this and still allows a fast iteration implementation.
 
-#### Takeaways
+#### Copy Performance
 
-Overall primitive maps deliver a large amount of memory savings, and in some, but not all cases, a reasonable 
-performance improvement as well. While JRE maps can be competitive for reads compared to some libraries, they do fall 
-behind for writes. Whether to switch, and which library to use is likely entirely dependent on your real usage
-patterns.
-
-
-
-Since we've just discussed naive copy scenarios in some detail, let's look instead at pre-allocated copy performance 
-next:
+Here we'll only examine pre-allocated copy performance, as we really discussed all the interesting bits of naive 
+copy performance just now under the iteration section (though feel free to check out naive copy results as well 
+under the [All Results](#all-results) section).
 
 {{< benchmark-chart benchmark="IntMap.preAllocatedCopy" title="Int → Int / preAllocatedCopy" >}}
 
-There's perhaps not too much surprising here - copy performance is tied to write performance, except that 
-FastCollect is able to substantially outperform all other maps. FastCollect attempts to use direct memcpy whenever 
-possible in copying, and for the simple copy performed here (start with an empty map, copy all elements from another 
+There's perhaps not too much surprising here - copy performance is tied to write performance, except that
+FastCollect is able to substantially outperform all other maps. FastCollect attempts to use direct memcpy whenever
+possible in copying, and for the simple copy performed here (start with an empty map, copy all elements from another
 map, which is already sized correctly) this yields much faster performance than manual iteration and insertion.
 
-Now that we've covered the basics, let's dig into a couple different areas of unusuality.
+### Further Investigations
 
-### Load Factor & Eclipse Performance
+#### Load Factor & Eclipse Performance
 
 Eclipse generally out-performs all the other libraries we've benchmarked - but we've hypothesized that this is due
 to the fact that it uses a load factor of 50%, where every other library uses a load factor of 75% or higher. Is
 this actually true though? Or is the load factor not actually the defining factor in Eclipse's performance? We couldn't
 perform full benchmarking (limited time), but here are the results for read geomean performance with all libraries
-set to 50% load factor where possible (AndroidX excluded since load factor is not adjustable, and FastCollect using
-a custom build).
+set to 50% load factor (AndroidX excluded since load factor is not adjustable, and FastCollect using a build with 
+load factor adjusted manually).
 
 {{< benchmark-chart benchmark="MapLF50.readGM" order="random" title="50% LF Map Read Geometric Mean — random keys" >}}
 
@@ -940,12 +947,17 @@ With all libraries at 50% load factor, Eclipse is now solidly middle of the pack
 FastCollect is now the fastest by a small margin. We can conclude that load factor was indeed the driving reason behind 
 Eclipse's performance.
 
-### AndroidX Oddities
+At lower load factors like 50%, there's a higher probability that any given entry will be residing in its home slot 
+(the slot it hashed to), meaning that this rewards libraries that have a fast home slot pathway. For a Robin Hood 
+hashtable, this also strongly increases the probability that if any entry is not at its home slot, it can be found 
+on the same cache line as the home slot, and thus reduces the probability of a cache miss.
+
+#### AndroidX Oddities
 
 AndroidX benchmarks (1) appear to hit a performance cliff at > ~32 million entries (2) timeout at very high numbers 
 of entries, so there is no data for > ~32 million entries (3) exhibit extremely poor performance with highBits keys.
 
-#### Performance Cliff At ~32 Million
+##### Performance Cliff At ~32 Million
 
 With about 32 million entries, AndroidX's metadata array (1 byte per entry) jumps from ~32MB to ~64MB, and thus no
 longer fits in the L3 cache of the benchmarking machine (32MB). Almost every probe is hitting cold memory
@@ -953,7 +965,7 @@ longer fits in the L3 cache of the benchmarking machine (32MB). Almost every pro
 intended for use on Android devices, which are likely to have a much smaller L3 cache than the desktop device used
 for this benchmarking, but also are unlikely to be dealing with such large maps.
 
-#### Benchmark Timeout
+##### Benchmark Timeout
 
 The timeout which leads to no benchmark data is not occurring within the benchmark, but within the setup method for 
 the benchmark, while the hashtable is being loaded. AndroidX does not offer any ensureCapacity() functionality, 
@@ -972,7 +984,7 @@ via the constructor - and we technically could have made use of this in the benc
 necessitated a different benchmarking structure for AndroidX than for every other library, and wasn't worth the
 trouble.
 
-#### Performance Drop For highBits Keys
+##### Performance Drop For HighBits Keys
 
 In order to understand why AndroidX is so much more affected by highBits keys we'll need to dig into how exactly the 
 library handles storage in the first place. AndroidX primarily uses a metadata array for lookups, with an equivalent 
@@ -986,8 +998,8 @@ Let's examine what happens with a highBits example:
 
 ```
 int hash(int key) {
-  var h = key * 0xCC9E2D51 // MurmurHashC1
-  return h ^ (h << 16)
+  var h = key * 0xCC9E2D51; // MurmurHashC1
+  return h ^ (h << 16);
 }
 
 key         = 11011000000000000000000000000000
@@ -1009,7 +1021,7 @@ we've achieved the absolute worst case - many keys all mapping to the same slot 
 probing), and each fingerprint matching every probe (so every group of metadata has to be explicitly compared with 
 the key which lives in a different array).
 
-### HPPC highBits Performance
+#### HPPC HighBits Performance
 
 HPPC is in many ways identical to Fastutil - same basic structure, same hash finalizer, same algorithms. So why does 
 its performance differ so drastically from Fastutil (and the other similar libraries) specifically for highBits 
@@ -1018,20 +1030,66 @@ Int → Int maps HPPC does indeed use the same hash finalizer as Fastutil and ot
 performance. However for Long keys, HPPC uses a different finalizer:
 
 ```java
-var h = key * 0x9e3779b97f4a7c15L  // PHI
-return (int) (h ^ (h >>> 32))
+var h = key * 0x9e3779b97f4a7c15L;  // PHI
+return (int) (h ^ (h >>> 32));
 ```
 
 Compare this to the Long key finalizer used by Fastutil and other libraries:
 
 ```java
-var h = key * 0x9e3779b97f4a7c15L  // PHI
-h = h ^ (h >>> 32)
-return (int) (h ^ (h >>> 16)) // second fold shifts entropy lower
+var h = key * 0x9e3779b97f4a7c15L;  // PHI
+h = h ^ (h >>> 32);
+return (int) (h ^ (h >>> 16));  // second fold shifts entropy lower
 ```
 
 HPPC's lack of an additional fold to spread entropy downwards leads to substantially worse performance for Long maps 
-on highBits keys, and this is visible in the end geometric mean results.
+on highBits keys, and this is visible in the final geometric mean results.
+
+### Final Takeaways
+
+We've confirmed the basics - primitive hash tables can deliver large memory savings compared to the JRE HashMap, and 
+are often (but not always!) faster for many operations. In the several different primitive hashtable libraries we've 
+explored however, what stands out?
+
+* JRE
+  * The extra memory usage was obvious of course, but I was impressed at the performance the JRE HashMap delivered 
+    in comparison to more specialized implementations. Never count it out!
+
+* AndroidX
+  * Swiss table design offers excellent GetMiss performance at larger sizes...
+  * But overall, the SWAR (SIMD Within A Register) techniques used do not appear as performant as the true SIMD 
+    operations the original C++ implementation used.
+  * Has some interesting failure cases (highBits keys, and performance cliff at ~32M entries) - but while 
+    disappointing, it's unlikely these would cause real world issues for most usages.
+
+* Eclipse
+  * Appeared exceptional at first, but once 50% load factor was taken into account was a bit more middle of the road.
+
+* Fastutil/HPPC/Agrona/PrimitiveCollections
+  * All of these implement pretty much the same hashtable, with minor variations that lead to small variations in 
+    efficiency for various operations.
+  * Fastutil is by far the most battle-tested, but HPPC also impressed with performance. Agrona and 
+    PrimitiveCollections don't really appear to improve on the standard, and often perform worse.
+
+* Trove
+  * The only prime-sized table here - it's good to see and evaluate a different approach, but overall couldn't 
+    compete that well.
+
+* FastCollect
+  * Saved my own for last - overall I'm happy with the performance here.
+  * I'm unconvinced that Robin Hood hashing is super effective. There are certainly scenarios it shines in, but I 
+    think for maximum performance simple linear probing without any hoopla (as implemented by Fastutil) gets closer 
+    to allowing the hardware to operate the way it wants to with maximum performance. Linear scanning through memory 
+    is hard to beat, and it's unclear that the Robin Hood extras on top of that are helping much.
+  * I'm quite happy this validated my idea of bit/byte reversal in the hash finalizer. As far as I can determine, 
+    this appears to be novel (I couldn't find any other information on any implementations using this technique), 
+    yet it performed very well. It's still possible someone with a deeper background than me could point out some 
+    fatal flaw. I am curious about bringing this family of reversing hash finalizers to a simple linear probing 
+    implementation - would that be even faster?
+
+In the end though, performance across all these libraries is respectable. It's difficult to imagine a scenario where 
+an additional ~2ns per lookup for example is really going to make an exceptional difference for production JVM code. On 
+the other hand, if you do have such a scenario, hopefully this benchmark has been useful! 
 
 ## All Results
 
