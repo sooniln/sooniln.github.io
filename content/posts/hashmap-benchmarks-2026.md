@@ -13,7 +13,7 @@ charts: true
 Hashtables are one of the building blocks of computer science, and deservedly get a lot of attention - but less so
 within the JVM ecosystem. Part of this may simply be that most Java code is not written with performance top of mind,
 or that the default JRE implementation is all-around quite reasonable - efficient, resistant against attacks, etc... 
-However, I'm interested however in focusing entirely on performance right now.
+However, I'm interested in focusing entirely on performance right now.
 
 For today, we're interested specifically in hashtables for primitive values. By focusing on values rather than
 references we'll entirely ignore the cost of heap allocation, pointer dereferencing, GC pressure, and also come up 
@@ -32,10 +32,10 @@ We'll benchmark and analyze the following libraries (links go to more detailed i
 * [JRE](#jre)
 * [FastCollect](#fastcollect) (I am the author of FastCollect)
 * [Fastutil](#fastutil)
-* [Eclipse](#eclipse)
 * [AndroidX](#androidx)
 * [Trove](#trove)
 * [Koloboke](#koloboke)
+* [Eclipse](#eclipse)
 * [HPPC](#hppc)
 * [Agrona](#agrona)
 * [PrimitiveCollections](#primitivecollections)
@@ -252,8 +252,8 @@ clustering - the cost is computing two hash functions and the non-sequential mem
 results in additional cache misses.
 
 **[Robin Hood hashing](https://en.wikipedia.org/wiki/Hash_table#Robin_Hood_hashing)** is a refinement of linear probing
-that swaps entry positions (swapping a "poorer" \[further from it's home slot\] entry with a "richer" \[closer to 
-it's home slot\] entry - hence Robin Hood) during insertion to reduce probe length variance. Entries that are "rich" 
+that swaps entry positions (swapping a "poorer" \[further from its home slot\] entry with a "richer" \[closer to 
+its home slot\] entry - hence Robin Hood) during insertion to reduce probe length variance. Entries that are "rich" 
 and landed near their ideal slot yield their position to "poor" entries that have traveled further. This equalizes 
 probe lengths and allows much higher load factors without the worst-case blow-up of plain linear probing (Robin Hood 
 hashtables are often run at load factors of 80%+ without much performance impact).
@@ -439,7 +439,7 @@ occurring on x86-64 we choose a slightly different approach: premix bits, multip
 bytes (not bits) with BSWAP/REV.
 
 ```java
-var h = ((key ^ (key >>> 16)) * 0x9E3779B9  // PHI
+var h = (key ^ (key >>> 16)) * 0x9E3779B9  // PHI
 return Integer.reverseBytes(h)
 ```
 
@@ -515,7 +515,7 @@ shorter clusters than linear probing would.
 * **Probing Strategy**: Double hashing
 * **Removal Strategy**: Tombstones, rehash if there are no free slots (only tombstones) left, also rehash if removal 
   allows backing array to shrink to the previous prime size
-* **Default Load Factor**: 75%
+* **Default Load Factor**: 50%
 
 **Integer key hash finalizer**: The identity hash — no bit mixing is applied; distribution quality relies entirely on
 the double-hashing probe and prime sized arrays to counteract clustering.
@@ -541,12 +541,12 @@ use of deprecated Unsafe APIs for performance.
 * **Storage Schema**: Power-of-two sized, interleaved array if key/value size matches, parallel arrays otherwise
 * **Probing Strategy**: Linear probing
 * **Removal Strategy**: Backwards-shift deletion
-* **Default Load Factor**: 75%
+* **Default Load Factor**: 66.7%
 
 **Integer key hash finalizer**: Knuth multiplicative hashing with constant shift.
 
 ```java
-var h = x * 0x9E3779B9 // PHI
+var h = key * 0x9E3779B9 // PHI
 return h ^ (h >>> 16)
 ```
 
@@ -618,8 +618,8 @@ return h ^ (h >>> 16)
 ### Agrona
 
 Agrona is Real Logic's utility library, developed primarily to support the [Aeron](https://github.com/aeron-io/aeron)
-messaging system. Agrona requires every map must have an unrepresentable value passed in on initialization (to mark 
-empty slots); thus Agrona is incapable of representing the full range of values.
+messaging system. Agrona requires that every map must have an unrepresentable value passed in on initialization (to 
+mark empty slots); thus Agrona is incapable of representing the full range of values.
 
 Note: Since Agrona does not have a Long → Int map, benchmarking uses Long → Long maps instead, and widens values. Be 
 wary of apples to apples comparisons.
@@ -638,9 +638,9 @@ wary of apples to apples comparisons.
 
 ```java
 var h = key ^ (key >>> 16)
-h = h * 0x119DE1f3
+h = h * 0x119DE1F3
 h = h ^ (h >>> 16)
-h = h * 0x119DE1f3
+h = h * 0x119DE1F3
 return h ^ (h >>> 16)
 ```
 
@@ -703,7 +703,7 @@ Eclipse does not allow for load factor adjustments, and remains at 50%.
 | Koloboke             | 66.7%   | 75%         | Yes        |
 | **Eclipse**          | 50%     | **50%**     | No         |
 | HPPC                 | 75%     | 75%         | Yes        |
-| Agrona               | n/a     | 75%         | Yes        |
+| Agrona               | 65%     | 75%         | Yes        |
 | PrimitiveCollections | 75%     | 75%         | Yes        |
 
 ### Key Selection and Ordering
@@ -768,9 +768,9 @@ almost perfect branch prediction because of this. Real world performance is goin
 exact pattern of hits/misses real world data gives you.
 
 In addition to the standard micro-benchmarking caveats, there are also hash table specific caveats. Notably, 
-hashtables that use tombstones for removal can have these substantially affect lookup times - but we performed no 
-benchmarking of removal + lookup scenarios. There are many other scenarios that could affect performance that were 
-also uncovered in any benchmarking - it's impossible to cover everything.
+hashtables that use tombstones for removal can have the tombstones substantially affect lookup times - but we 
+performed no benchmarking of removal + lookup scenarios. There are many other scenarios that could affect performance
+that were also uncovered in any benchmarking - it's impossible to cover everything.
 
 ## Benchmark Results
 
@@ -805,7 +805,7 @@ are also on display.
 {{< benchmark-chart benchmark="LongMap.memory" title="Long → Int Map Memory Usage" yAxis="linear" >}}
 
 Results are pretty much the same, except that Agrona now uses more memory (recall that as a special-purpose library 
-Agrona does not support Long → Int maps, and thus we use it's Long → Long map instead).
+Agrona does not support Long → Int maps, and thus we use its Long → Long map instead).
 
 #### Read Performance
 
@@ -995,9 +995,9 @@ the key which lives in a different array).
 ### HPPC highBits Performance
 
 HPPC is in many ways identical to Fastutil - same basic structure, same hash finalizer, same algorithms. So why does 
-it's performance differ so drastically from Fastutil (and the other similar libraries) specifically for highBits 
+its performance differ so drastically from Fastutil (and the other similar libraries) specifically for highBits 
 keys? The answer lies in the details - we are looking at the geomean between both Int → Int and Long → Int maps. For
-Int → Int maps HPPC does indeed use the same has finalizer as Fastutil and other maps, and sees identical 
+Int → Int maps HPPC does indeed use the same hash finalizer as Fastutil and other maps, and sees identical 
 performance. However for Long keys, HPPC uses a different finalizer:
 
 ```java
