@@ -501,9 +501,9 @@ return h ^ (h << 16)
 
 ### Trove
 
-GNU Trove uses open addressing with double hashing: rather than a fixed linear step, each key computes a secondary
-probe stride from its primary hash, so colliding keys scatter along independent paths and form shorter clusters than
-linear probing would.
+GNU Trove uses prime sizing and open addressing with double hashing: rather than a fixed linear step, each key 
+computes a secondary probe stride from its primary hash, so colliding keys scatter along independent paths and form 
+shorter clusters than linear probing would.
 
 **Source**: [bitbucket.org/trove4j/trove](https://bitbucket.org/trove4j/trove)  
 **Maven**: `net.sf.trove4j:core:3.1.0`  
@@ -730,24 +730,24 @@ majority of real-world scenarios in the JVM ecosystem.
 
 We benchmark the following operations:
 
-* **getHit**: The cost of looking up a value for a key present in the hashtable. Note that since different 
+* **GetHit**: The cost of looking up a value for a key present in the hashtable. Note that since different 
   hashtables have different conventions for representing keys that are not present (some of which may give that 
   hashtable an unfair advantage), we use getOrDefault() or equivalent APIs for a fair comparison.
-* **getMiss**: The cost of looking up a value for a key not present in the hashtable. Note that since different
+* **GetMiss**: The cost of looking up a value for a key not present in the hashtable. Note that since different
   hashtables have different conventions for representing keys that are not present (some of which may give that
   hashtable an unfair advantage), we use getOrDefault() or equivalent APIs for a fair comparison.
-* **putHit**: The cost of changing the value for a key present in the hashtable. When offered, this will always use 
+* **PutHit**: The cost of changing the value for a key present in the hashtable. When offered, this will always use 
   an API which does not return a value in order to find the cheapest possible cost.
-* **putMiss**: The cost of assigning a value to a key not present in the hashtable. When offered, this will always use
+* **PutMiss**: The cost of assigning a value to a key not present in the hashtable. When offered, this will always use
   an API which does not return a value in order to find the cheapest possible cost.
-* **removeAndPutMiss**: The cost of removing a key and then assigning a value to a different key that is not present in
+* **RemoveAndPutMiss**: The cost of removing a key and then assigning a value to a different key that is not present in
   the table. The setup of JMH tests makes it difficult to accurately quantify the cost of just a remove operation - 
   this is a compromise.
-* **forEach**: The cost of iterating over every key/value present in the hashtable using the fastest iteration 
+* **ForEach**: The cost of iterating over every key/value present in the hashtable using the fastest iteration 
   technique exposed by the hashtable (likely not iterators).
-* **naiveCopy**: The cost of copying the hashtable starting from empty and inserting elements until complete - 
+* **NaiveCopy**: The cost of copying the hashtable starting from empty and inserting elements until complete - 
   with no information given on the total number of elements to be expected, so no pre-allocation can be done.
-* **preAllocatedCopy**: The cost of copying the hashtable directly from another hashtable (so size and layout is 
+* **PreAllocatedCopy**: The cost of copying the hashtable directly from another hashtable (so size and layout is 
   known - may just be a memcpy in the cheapest case).
 
 ### Micro-Benchmarking Caveats
@@ -785,23 +785,156 @@ Double-clicking a graph will reset its pan/zoom.
 Rather than forcing you to scroll past the excessive graphs and numbers below which go into individual scenarios, 
 might as well cut to the chase, right?
 
+For map iteration and copying benchmark results, find the relevant [All Results](#all-results) section.
+
+#### Memory Usage
+
+Memory usage is measured with the [JOL (Java Object Layout)](https://github.com/openjdk/jol) library. Note that when 
+some libraries are missing data at higher sizes this is because they timed out. This is particularly relevant for 
+JRE and AndroidX - both lack an ensureCapacity() API, and thus cannot be efficiently filled with elements in our 
+memory benchmark. Note also that several libraries use pretty much the exact same amount of memory, and thus their 
+data series are overlaid on top of one another in the graph. Recall that clicking a library in the legend will 
+hide/show its data series.
+
+{{< benchmark-chart benchmark="IntMap.memory" title="Int → Int Map Memory Usage" yAxis="linear" >}}
+
+Results are pretty much as we'd expect - JRE maps which store objects take up 3-6.5x as much memory as maps which store
+primitives. The effects of prime sizing (Trove) vs power-of-two sizing (everyone else) and different load factors 
+are also on display.
+
+{{< benchmark-chart benchmark="LongMap.memory" title="Long → Int Map Memory Usage" yAxis="linear" >}}
+
+Results are pretty much the same, except that Agrona now uses more memory (recall that as a special-purpose library 
+Agrona does not support Long → Int maps, and thus we use it's Long → Long map instead).
+
+#### Read Performance
+
+Read performance is calculated as the geometric mean of GetHit and GetMiss benchmarks. This weights both hits and 
+misses equally, an assumption which may not be true in various real world workloads. Results for the three orderings 
+(random, lowBits, highBits) follow:
+
 {{< benchmark-chart benchmark="Map.readGM" order="random" title="Map Read Geometric Mean — random keys" >}}
+
+As this is the first graph we're looking at, note the distinct regime changes as the hashtable size increases past
+L1/L2/L3 cache sizes. For many of the power-of-two sized graphs we see the distinct sawtooth performance that comes
+from different load factors as the table is queried when more empty vs more full (the sizes benchmarked were 
+explicitly chosen to differentiate this). Looking at AndroidX, we can note two things - (1) a more subdued change in 
+performance as size increases, and (2) it hits a performance cliff and times out around 32M entries. Further 
+analysis of AndroidX can be found later. We also note that JRE read performance is relatively competitive (although 
+it uses far more memory). Eclipse is the obvious fastest across all sizes - however how much of its performance is 
+due to the fact that it is using an unfairly (for comparison purposes) lower load factor? We'll dig into that later 
+as well.
 
 {{< benchmark-chart benchmark="Map.readGM" order="lowBits" title="Map Read Geometric Mean — lowBits keys" >}}
 
+Recall that lowBits keys concentrate their entropy in the lower bits, which is where most of these tables calculate 
+slot positions from. The biggest change we see here is with Trove performance (it was one of the slowest for random 
+keys, but is now among the fastest for lowBits keys). As covered earlier, Trove uses the identity hash (which is 
+"perfect" for lowBits keys), so it is unsurprising that it performs so well with them. Eclipse also improves its 
+performance - Eclipse's first choice of hash finalizer is also the identity hash.
+
 {{< benchmark-chart benchmark="Map.readGM" order="highBits" title="Map Read Geometric Mean — highBits keys" >}}
+
+Recall that highBits keys concentrate their entropy in the higher bits, which most of these tables ignore in order 
+to calculate slot positions. So we expect this to be an interesting "adversarial" order, and the results bear that 
+out. AndroidX and HPPC in particular show pathological performance degradation, especially at smaller sizes, with 
+AndroidX managing to take ~1600ns on average for a lookup in the absolute worst case. Fastutil and PrimitiveCollections 
+also see performance taking a hit, though not to the same extreme factor. Interestingly, if we look at JRE 
+performance, it's possible that we're able to see the effect of JRE's red-black tree fallback ameliorating the 
+performance hit here (though I have not confirmed that). FastCollect performs sufficiently well with highBits keys 
+that it is able to out-perform even Eclipse, though Eclipse is operating at a load factor of 50% and FastCollect at
+83%.
+
+#### Write Performance
+
+Write performance is calculated as the geometric mean of the PutHit, PutMiss, and RemoveAndPutMiss benchmarks. This 
+weights misses higher, as they are represented twice (PutMiss and RemoveAndPutMiss), an assumption which may not be 
+true in various real world workloads. Results for the three orderings (random, lowBits, highBits) follow:
 
 {{< benchmark-chart benchmark="Map.writeGM" order="random" title="Map Write Geometric Mean — random keys" >}}
 
+We immediately see some patterns which look the same as from the read results, and note that AndroidX again hits a 
+performance cliff and times out at higher sizes. JRE is less competitive for write than reads it would also appear 
+here, and while Eclipse is again generally the fastest, it isn't as dominant as it was for reads (again with the 
+caveat that Eclipse is operating at a different load factor than all the other libraries).
+
 {{< benchmark-chart benchmark="Map.writeGM" order="lowBits" title="Map Write Geometric Mean — lowBits keys" >}}
+
+Again, similar patterns for lowBits in writes from reads. Trove performs better with lowBits keys than random keys 
+(thanks to its identity finalizer), and the same for Eclipse (with its first choice identity finalizer).
 
 {{< benchmark-chart benchmark="Map.writeGM" order="highBits" title="Map Write Geometric Mean — highBits keys" >}}
 
-### AndroidX Timeouts + Performance Cliff
+And for highBits keys we see the same patterns for AndroidX and HPPC, awful performance, especially at lower sizes. 
+Fastutil and PrimitiveCollections show the same degradation, just not as bad.
 
-AndroidX benchmarks appear to hit a performance cliff at > ~32 million entries. In addition, the AndroidX 
-benchmarks timeout at very high numbers of entries, so there is no data for > ~32 million entries. These are actually 
-two separate issues.
+#### Takeaways
+
+Overall primitive maps deliver a large amount of memory savings, and in some, but not all cases, a reasonable 
+performance improvement as well. While JRE maps can be competitive for reads compared to some libraries, they do fall 
+behind for writes. Whether to switch, and which library to use is likely entirely dependent on your real usage
+patterns.
+
+So far we haven't discussed iteration or copying at all, so let's take a look at two representative graphs from the 
+[All Results](#all-results) section below. Let's start with iteration speed:
+
+{{< benchmark-chart benchmark="IntMap.forEach" title="Int → Int / forEach" >}}
+
+JRE iteration is obviously much slower than every other library - a direct consequence of how much more memory it 
+uses. Accessing more memory in a linear fashion takes more time - no two ways about it. HPPC also has surprisingly 
+slow iteration... This is a consequence of a design decision HPPC has made to prevent the user from shooting 
+themselves in the foot with naive copy operations. Most of these maps iterate in the same order as elements appear 
+in the backing array via their hashcode, which means iteration indirectly exposes hash order. Inserting elements in 
+hash order is generally a worst case scenario, and can cause quadratic runtimes (but the fix is also generally 
+trivial, simply pre-size the map appropriately). In order to prevent this, HPPC inserts a random step in iteration -
+iteration no longer exposes hash ordering, but is also now not very cache friendly and thus is slower. Many of the 
+other libraries suffer the same problem, but generally ignore it and allow the user to shoot themselves in the foot 
+if they aren't careful with proper pre-sizing so that iteration is not artificially slowed.
+
+FastCollect suffers the same problem as well, but takes a slightly different approach. The Robin Hood invariant 
+maintained in the map means we can expect reasonable upper bounds on run length for various map sizes. If 
+FastCollect detects pathologically long run lengths that should never be expected under any normal scenario, it will 
+pre-emptively resize the map larger, thus pathologically quadratic cases.
+
+Since we've just discussed naive copy scenarios in some detail, let's look instead at pre-allocated copy performance 
+next:
+
+{{< benchmark-chart benchmark="IntMap.preAllocatedCopy" title="Int → Int / preAllocatedCopy" >}}
+
+There's perhaps not too much surprising here - copy performance is tied to write performance, except that 
+FastCollect is able to substantially outperform all other maps. FastCollect attempts to use direct memcpy whenever 
+possible in copying, and for the simple copy performed here (start with an empty map, copy all elements from another 
+map, which is already sized correctly) this yields much faster performance than manual iteration and insertion.
+
+Now that we've covered the basics, let's dig into a couple different areas of unusuality.
+
+### Load Factor & Eclipse Performance
+
+Eclipse generally out-performs all the other libraries we've benchmarked - but we've hypothesized that this is due
+to the fact that it uses a load factor of 50%, where every other library uses a load factor of 75% or higher. Is
+this actually true though? Or is the load factor not actually the defining factor in Eclipse's performance? We couldn't
+perform full benchmarking (limited time), but here are the results for read geomean performance with all libraries
+set to 50% load factor where possible (AndroidX excluded since load factor is not adjustable, and FastCollect using
+a custom build).
+
+{{< benchmark-chart benchmark="MapLF50.readGM" order="random" title="50% LF Map Read Geometric Mean — random keys" >}}
+
+With all libraries at 50% load factor, Eclipse is now solidly middle of the pack for read performance, and
+FastCollect is now the de-facto fastest by a small margin. Load factor was indeed the driving reason behind
+Eclipse's performance.
+
+### AndroidX Oddities
+
+AndroidX benchmarks (1) appear to hit a performance cliff at > ~32 million entries (2) timeout at very high numbers 
+of entries, so there is no data for > ~32 million entries (3) exhibit extremely poor performance with highBits keys.
+
+#### Performance Cliff At ~32 Million
+
+With about 32 million entries, AndroidX's metadata array (1 byte per entry) jumps from ~32MB to ~64MB, and thus no
+longer fits in the L3 cache of the benchmarking machine (32MB). Almost every probe is hitting cold memory
+(perhaps further exacerbated by the geometric probing sequence?). It's worth remembering that AndroidX is primarily
+intended for use on Android devices, which are likely to have a much smaller L3 cache than the desktop device used
+for this benchmarking, but also are unlikely to be dealing with such large maps.
 
 #### Benchmark Timeout
 
@@ -817,142 +950,112 @@ This comes down to a couple features of AndroidX's design:
 * Higher load factor (87.5%) means more elements to rehash every rehash.
 
 I suspect that if AndroidX offered an `ensureCapacity()` API it would ameliorate these issues sufficiently to allow for
-benchmarking at higher sizes and further investigate the performance cliff.
+benchmarking at higher sizes and further investigate the performance cliff. Note that AndroidX does allow pre-sizing 
+via the constructor - and we technically could have made use of this in the benchmark. However, that would have 
+necessitated a different benchmarking structure for AndroidX than for every other library, and wasn't worth the
+trouble.
 
-#### Performance Cliff At ~32 Million
+#### Performance Drop For highBits Keys
 
-With about 32 million entries, AndroidX's metadata array (1 byte per entry) jumps from ~32MB to ~64MB, and thus no 
-longer fits in the L3 cache of the benchmarking machine (32MB). Almost every probe is hitting cold memory 
-(perhaps further exacerbated by the geometric probing sequence?). It's worth remembering that AndroidX is primarily 
-intended for use on Android devices, which are likely to have a much smaller L3 cache than the desktop device used 
-for this benchmarking.
+In order to understand why AndroidX is so much more affected by highBits keys we'll need to dig into how exactly the 
+library handles storage in the first place. AndroidX primarily uses a metadata array for lookups, with an equivalent 
+key and value array. We'll focus only on the metadata array for now. When a key is hashed, the resulting 32-bit hash 
+is separated into two parts:
 
-### 50% Load Factor
+* H1: the hash's 25 most significant bits - used to determine the initial slot via masking by table size
+* H2: the hash's 7 least significant bits - stored as a fingerprint within the metadata array
 
-### Int → Int
+Let's examine what happens with a highBits example:
 
-We start with the results of benchmarking Int → Int hashtables.
+```
+int hash(int key) {
+  var h = key * 0xCC9E2D51 // MurmurHashC1
+  return h ^ (h << 16)
+}
+
+key         = 11011000000000000000000000000000
+hash        = 01011000000000000000000000000000
+slot        = 0 // 0101100000000000000000000 & 1111 (table size is 16 in this example)
+fingerprint = 0
+
+key         = 01010110000000000000000000000000
+hash        = 00110110000000000000000000000000
+slot        = 0 // 0011011000000000000000000 & 1111 (table size is 16 in this example)
+fingerprint = 0
+```
+
+Note that the hash function has barely changed the key at all - the multiplication is not terribly effective as 
+expected, but where other libraries use a xor-right-shift to introduce a little more entropy to lower bits, AndroidX's
+xor-left-shift accomplishes nothing. The xor-left-shift is much more useful when more of the entropy is in the lower 
+bits, as is the case for lowBits keys for example. The resulting slot and fingerprint are exactly the same, meaning 
+we've achieved the absolute worst case - many keys all mapping to the same slot (and then distributed via geometric 
+probing), and each fingerprint matching every probe (so every group of metadata has to be explicitly compared with 
+the key which lives in a different array).
+
+### HPPC highBits Performance
+
+HPPC is in many ways identical to Fastutil - same basic structure, same hash finalizer, same algorithms. So why does 
+it's performance differ so drastically from Fastutil (and the other similar libraries) specifically for highBits 
+keys? The answer lies in the details - we are looking at the geomean between both Int → Int and Long → Int maps. For
+Int → Int maps HPPC does indeed use the same has finalizer as Fastutil and other maps, and sees identical 
+performance. However for Long keys, HPPC uses a different finalizer:
+
+```java
+var h = key * 0x9e3779b97f4a7c15L  // PHI
+return (int) (h ^ (h >>> 32))
+```
+
+Compare this to the Long key finalizer used by Fastutil and other libraries:
+
+```java
+var h = key * 0x9e3779b97f4a7c15L  // PHI
+h = h ^ (h >>> 32)
+return (int) (h ^ (h >>> 16)) // second fold shifts entropy lower
+```
+
+### All Results
+
+At this point, the only thing left is all the raw benchmarking results - feel free to continue scrolling if those 
+are of interest, otherwise there's nothing more to read.
 
 #### Int → Int / getHit
 
 {{< benchmark-chart benchmark="IntMap.getHit" order="random" title="Int → Int / getHit — random keys" >}}
-
-As this is the first graph we're looking at, note the distinct regime changes as the hashtable size increases past 
-L1 and L2 cache size. For many of the power-of-two sized graphs we see the distinct sawtooth performance that comes 
-from different load factors as the table is queried when more empty vs more full. The JRE boxed HashMap is on the 
-slower side but remains reasonably competitive. Eclipse performs well with its maximum 50% load factor, though at 
-the cost of almost double the memory usage in some cases.
-
 {{< benchmark-chart benchmark="IntMap.getHit" order="lowBits" title="Int → Int / getHit — lowBits keys" >}}
-
-Trove performs dramatically better on lowBits keys than on random keys. Recall that Trove uses the identity hash 
-function and prime-sized tables - for lowBits keys the identity hash is pretty much a perfect hash function, which 
-explains its excellent performance.
-
 {{< benchmark-chart benchmark="IntMap.getHit" order="highBits" title="Int → Int / getHit — highBits keys" >}}
-
-AndroidX was performing on the slower side, but still reasonably for random and lowBits keys - however it completely 
-falls apart on highBits keys, especially at smaller sizes. ~1500 ns to find any key in a 4k sized table is very odd 
-and troubling. Recall that AndroidX uses the low 7 bits as the fingerprint - it's likely that the fingerprint is 
-falsely matching at a much higher rate than 1/128 and forcing a check of almost every entry. This indicates poor 
-hash mixing, and it seems likely AndroidX worst case performance could be improved with a stronger mixing function.
-
-The more classic linear probing implementations (Fastutil, HPPC, PrimitiveCollections) also see performance 
-degradation, but interestingly performance improves dramatically until at 32K entries before falling off again.
-
-Agrona comes ahead as a winner in part to the extra mixing its hash function achieves.
 
 #### Int → Int / getMiss
 
 {{< benchmark-chart benchmark="IntMap.getMiss" order="random" title="Int → Int / getMiss — random keys" >}}
-
-Eclipse (thanks to its 50% load factor) and AndroidX dominate getMiss performance. This is exactly what we'd expect 
-from AndroidX as well - getMiss means the entire probe chain must be scanned before giving up, and AndroidX can scan 
-long chains quicker than any other implementation thanks to its small (and thus easy to keep in cache) metadata 
-array and SWAR techniques to scan 8 slots at a time. Note also however the performance falling of a cliff at 32M+ 
-entries (benchmarks at larger sizes timed out completely). I'm unsure exactly what causes this, though I wonder if it's 
-related to the metadata array no longer fitting in L3 cache + AndroidX using cache unfriendly geometric probing?
-
 {{< benchmark-chart benchmark="IntMap.getMiss" order="lowBits" title="Int → Int / getMiss — lowBits keys" >}}
-
-As we've learned to expect, Trove is more competitive with lowBits keys.
-
 {{< benchmark-chart benchmark="IntMap.getMiss" order="highBits" title="Int → Int / getMiss — highBits keys" >}}
-
-AndroidX again is particularly vulnerable against highBits keys, and still has the performance cliff at 32M+. 
-Fastutil, HPPC and PrimitiveCollections all show the exact same odd spike in performance at ~95K elements - I am at 
-a loss as to what might be causing that.
-
-One interesting thing to note is I believe (though I have not confirmed) that we can see the effect of the JRE 
-fallback to red-black trees instead of linked lists for storage - note how JRE performance recovers at ~10M elements.
 
 #### Int → Int / putHit
 
 {{< benchmark-chart benchmark="IntMap.putHit" order="random" title="Int → Int / putHit — random keys" >}}
-
-Our "usual suspects" for linear probing implementations appears to be more competitive with Eclipse for put 
-operations rather than get operations. Otherwise, nothing too shocking here, though JRE performance does appear to 
-fall off a cliff at large sizes...
-
 {{< benchmark-chart benchmark="IntMap.putHit" order="lowBits" title="Int → Int / putHit — lowBits keys" >}}
-
-As before, Trove continues to perform better for lowBits keys. Nothing too shocking otherwise.
-
 {{< benchmark-chart benchmark="IntMap.putHit" order="highBits" title="Int → Int / putHit — highBits keys" >}}
-
-As before, several hashtables are flummoxed by highBits keys, and Agrona and Eclipse seem to have the most stable 
-performance.
 
 #### Int → Int / putMiss
 
 {{< benchmark-chart benchmark="IntMap.putMiss" order="random" title="Int → Int / putMiss — random keys" >}}
-
-As in the putHit benchmark, the linear probing implementations remain competitive with Eclipse. I am surprised 
-AndroidX didn't perform better - as putMiss should require scanning to the end of a probe chain (which AndroidX is 
-exceptionally fast at), but perhaps the additional write overhead in AndroidX as it twiddles bits is offsetting this?
-
 {{< benchmark-chart benchmark="IntMap.putMiss" order="lowBits" title="Int → Int / putMiss — lowBits keys" >}}
-
-Not much new to observe here.
-
 {{< benchmark-chart benchmark="IntMap.putMiss" order="highBits" title="Int → Int / putMiss — highBits keys" >}}
-
-Nor here - same patterns we observed previously persist.
 
 #### Int → Int / removeAndPutMiss
 
 {{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="random" title="Int → Int / removeAndPutMiss — random keys" >}}
-
-Almost all the implementations demonstrate a more pronounced sawtooth here, as they become more sensitive to the exact
-load factor. The JRE HashMap performs quite well, beating most other unboxed implementations, including Eclipse, 
-until it gets to ~512K elements. AndroidX performance falls off a cliff with large numbers of elements, and this 
-does not appear to be related to the keys at all, since this performance cliff is visible for both lowBits and 
-highBits removeAndPutMiss benchmarks as well.
-
 {{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="lowBits" title="Int → Int / removeAndPutMiss — lowBits keys" >}}
-
-Overall, not much change for lowBits benchmarks vs random - do note however that Trove has *not* improved relative 
-to random, as we saw for all the get/put benchmarks...
-
 {{< benchmark-chart benchmark="IntMap.removeAndPutMiss" order="highBits" title="Int → Int / removeAndPutMiss — highBits keys" >}}
-
-Largely the same patterns we've seen before here.
 
 #### Int → Int / forEach
 
 {{< benchmark-chart benchmark="IntMap.forEach" title="Int → Int / forEach" >}}
 
-The time it takes to iterate over a hashtable is heavily influenced by the cost of skipping empty entries.
-
 #### Int → Int / naiveCopy + preAllocatedCopy
 
 {{< benchmark-chart benchmark="IntMap.naiveCopy" title="Int → Int / naiveCopy" >}}
 {{< benchmark-chart benchmark="IntMap.preAllocatedCopy" title="Int → Int / preAllocatedCopy" >}}
-
-### Long → Int
-
-Now the results of benchmarking Long → Int hashtables. Note that since Agrona does not support Long → Int tables, it 
-is being benchmarked with a Long → Long table.
 
 #### Long → Int / getHit
 

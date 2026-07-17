@@ -2,10 +2,11 @@
 {{ $benchmark := .Get "benchmark" }}
 {{ $order := .Get "order" }}
 {{ $title := .Get "title" | default (printf "%s — %s keys" $benchmark (.Get "order")) }}
+{{ $yAxis := .Get "yAxis" | default "log" }}
 
 <div class="benchmark-chart-wrap">
   <div class="benchmark-chart-toolbar">
-    <button id="{{ $id }}-yscale" class="benchmark-chart-btn active" title="Toggle y-axis scale">Linear Y-Axis</button>
+    <button id="{{ $id }}-yscale" class="benchmark-chart-btn" title="Toggle y-axis scale"></button>
   </div>
   <canvas id="{{ $id }}"></canvas>
   <p class="benchmark-chart-hint">Scroll to zoom &middot; drag to pan &middot; double-click to reset</p>
@@ -17,6 +18,7 @@
   var ORDER     = {{ $order     | jsonify | safeJS }};
   var CHART_ID  = {{ $id        | jsonify | safeJS }};
   var TITLE     = {{ $title     | jsonify | safeJS }};
+  var Y_SCALE   = {{ $yAxis     | jsonify | safeJS }} === 'linear' ? 'linear' : 'logarithmic';
 
   var COLORS = [
     '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
@@ -115,7 +117,7 @@
               callback: function (v) { return fmtSize(Math.pow(2, v)); }
             }
           },
-          y: { type: 'logarithmic', title: { display: true, text: 'Median Time (' + unit + ')' } }
+          y: { type: Y_SCALE, title: { display: true, text: 'Median (' + unit + ')' } }
         }
       }
     });
@@ -123,11 +125,16 @@
     canvas.addEventListener('dblclick', function () { chart.resetZoom(); });
 
     var btn = document.getElementById(CHART_ID + '-yscale');
+    function updateButton() {
+      var isLog = chart.options.scales.y.type === 'logarithmic';
+      btn.textContent = isLog ? 'Linear Y-Axis' : 'Logarithmic Y-Axis';
+      btn.classList.toggle('active', isLog);
+    }
+    updateButton();
     btn.addEventListener('click', function () {
       var isLog = chart.options.scales.y.type === 'logarithmic';
       chart.options.scales.y.type = isLog ? 'linear' : 'logarithmic';
-      btn.textContent = isLog ? 'Logarithmic Y-Axis' : 'Linear Y-Axis';
-      btn.classList.toggle('active', !isLog);
+      updateButton();
       chart.resetZoom();
       chart.update();
     });
