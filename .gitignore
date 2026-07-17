@@ -1,6 +1,8 @@
 ### hugo ###
 public/
 .hugo_build.lock
+assets/jsconfig.json
+resources/_gen
 
 ### IntelliJ IDEA ###
 .idea/

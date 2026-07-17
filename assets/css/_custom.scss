@@ -1,0 +1,72 @@
+.benchmark-chart-wrap {
+    margin: 2em 0;
+}
+
+.benchmark-chart-canvas {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 2 / 1;
+}
+
+.benchmark-chart-wrap canvas {
+    cursor: grab;
+    display: block;
+}
+
+.benchmark-chart-wrap canvas:active {
+    cursor: grabbing;
+}
+
+.benchmark-chart-hint {
+    text-align: center;
+    font-size: 0.78em;
+    color: $global-font-secondary-color;
+    margin-top: 0.4em;
+
+    [data-theme='dark'] & {
+        color: $global-font-secondary-color-dark;
+    }
+}
+
+.benchmark-chart-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.4em;
+}
+
+.benchmark-chart-btn {
+    font-size: 0.78em;
+    padding: 0.2em 0.7em;
+    border: 1px solid $global-border-color;
+    border-radius: 4px;
+    background: transparent;
+    color: $global-font-secondary-color;
+    cursor: pointer;
+
+    [data-theme='dark'] & {
+        border-color: $global-border-color-dark;
+        color: $global-font-secondary-color-dark;
+    }
+}
+
+.benchmark-chart-btn:hover {
+    color: $global-font-color;
+    border-color: $global-font-color;
+
+    [data-theme='dark'] & {
+        color: $global-font-color-dark;
+        border-color: $global-font-color-dark;
+    }
+}
+
+.benchmark-chart-btn.active {
+    background: $global-font-color;
+    color: $global-background-color;
+    border-color: $global-font-color;
+
+    [data-theme='dark'] & {
+        background: $global-font-color-dark;
+        color: $global-background-color-dark;
+        border-color: $global-font-color-dark;
+    }
+}

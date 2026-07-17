@@ -1,26 +1,49 @@
 baseURL = 'https://sooniln.github.io/'
 locale = 'en-us'
 title = 'Soonil Nagarkar'
-theme = 'PaperMod'
-paginate = 10
+theme = 'FixIt'
+
+[pagination]
+  pagerSize = 10
+
+[outputs]
+  home = ["html", "rss", "archives", "search"]
 
 [params]
-  author = "Soonil Nagarkar"
+  [params.author]
+    name = "Soonil Nagarkar"
 
-[params.assets]
-  favicon = "favicon.svg"
-  ShowReadingTime = true
-  ShowPostNavLinks = true
-  ShowBreadCrumbs = false
-  ShowCodeCopyButtons = true
+  [params.app]
+    svgFavicon = "/favicon.svg"
 
-[[params.socialIcons]]
-  name = "linkedin"
-  url = "https://www.linkedin.com/in/sooniln/"
+  [params.home.profile]
+    enable = true
+    title = "Soonil Nagarkar"
 
-[[params.socialIcons]]
-  name = "github"
-  url = "https://github.com/sooniln"
+  [params.search]
+    enable = true
+    type = "fuse"
+
+  [params.social]
+    GitHub = "sooniln"
+    Linkedin = "sooniln"
+
+  [params.page]
+    license = ""
+    linkToVscode = false
+
+  [params.page.toc]
+    position = "left"
+
+  [params.page.math]
+    enable = true
+    type = "katex"
+
+  [params.page.share]
+    enable = false
+
+  [params.cookieconsent]
+    enable = false
 
 [markup.goldmark.extensions.passthrough]
   enable = true

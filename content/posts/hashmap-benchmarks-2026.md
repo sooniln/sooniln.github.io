@@ -1,31 +1,34 @@
 ---
 title: "Comprehensive JVM Primitive Hashtable Benchmarks 2026"
-date: 2026-06-18
+date: 2026-07-16
 draft: false
-ShowToc: true
-TocOpen: true
 math: true
-charts: true
+library:
+  js:
+    js1Hammer: https://cdn.jsdelivr.net/npm/hammerjs@2/hammer.min.js
+    js2ChartJs: https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js
+    js3ChartJsZoom: https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2/dist/chartjs-plugin-zoom.min.js
 ---
 
 ## Introduction
 
 Hashtables are one of the building blocks of computer science, and deservedly get a lot of attention - but less so
 within the JVM ecosystem. Part of this may simply be that most Java code is not written with performance top of mind,
-or that the default JRE implementation is all-around quite reasonable - efficient, resistant against attacks, etc... 
-However, I'm interested in focusing entirely on performance right now.
+or that the default JRE implementation is all-around quite reasonable - efficient, resistant against attacks, why 
+fix it if it ain't broke? We're interested in squeezing out every last byte and cycle of performance however, and 
+that means we want to focus on primitive maps.
 
-For today, we're interested specifically in hashtables for primitive values. By focusing on values rather than
-references we'll entirely ignore the cost of heap allocation, pointer dereferencing, GC pressure, and also come up 
-with an analysis that will hopefully continue to hold weight with upcoming
+Using values rather than references means we'll entirely ignore the cost of heap allocation, pointer dereferencing, 
+lower GC pressure, and also come up with an analysis that will hopefully continue to hold weight with upcoming
 [Valhalla](https://openjdk.org/projects/valhalla/) changes to the JVM.
 
 Hashtables that store values rather than references can provide a range of large performance benefits within the JVM,
-such as no boxing, no pointer indirection, better cache locality, etc... The JVM ecosystem has accumulated a handful of
-libraries that address this by providing hashtables backed by primitive arrays. The problem is that the performance 
-tradeoffs and design choices between them are neither obvious nor well-documented anywhere. Many different choices 
-are made around hash functions, collision resolution strategies, load factors, and those choices produce
-meaningfully different performance profiles yet there is pretty much no data available on head-to-head performance.
+such as no boxing, no pointer indirection, better cache locality, and so forth... The JVM ecosystem has accumulated a 
+handful of libraries that address this by providing hashtables backed by primitive arrays. The problem is that the 
+performance tradeoffs and design choices between them are neither obvious nor well-documented anywhere. Many 
+different choices are made around hash functions, collision resolution strategies, load factors, and those choices 
+produce meaningfully different performance profiles yet there is pretty much no data available on head-to-head 
+performance.
 
 We'll benchmark and analyze the following libraries (links go to more detailed information lower down this page):
 
