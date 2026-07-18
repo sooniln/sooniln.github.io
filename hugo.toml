@@ -7,7 +7,16 @@ theme = 'FixIt'
   pagerSize = 10
 
 [outputs]
-  home = ["html", "rss", "archives", "search"]
+  home = ["html", "rss", "archives"]
+
+[menus]
+  [[menus.main]]
+    identifier = "archives"
+    name = "Archives"
+    url = "/archives/"
+    weight = 1
+    [menus.main.params]
+      icon = "fa-solid fa-archive"
 
 [params]
   [params.author]
@@ -20,10 +29,6 @@ theme = 'FixIt'
     enable = true
     title = "Soonil Nagarkar"
 
-  [params.search]
-    enable = true
-    type = "fuse"
-
   [params.social]
     GitHub = "sooniln"
     Linkedin = "sooniln"
@@ -31,6 +36,8 @@ theme = 'FixIt'
   [params.page]
     license = ""
     linkToVscode = false
+    wordCount = false
+    readingTime = false
 
   [params.page.toc]
     position = "left"

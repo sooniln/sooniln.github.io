@@ -35,13 +35,6 @@ are neither obvious nor well-documented anywhere. Many different choices are mad
 resolution strategies, load factors, and those choices produce meaningfully different performance profiles yet there 
 is pretty much no modern data available on head-to-head performance. The goal of this post is to rectify that.
 
-Some of the questions we want to address:
-
-* How important are load factors and how do they affect performance?
-* How well does a JVM [Swiss Table](https://abseil.io/about/design/swisstables) port (AndroidX) work?
-* What's the effect of a novel (AFAIK) hash finalizer?
-* How well does the JRE HashMap hold up (spoiler: reasonably well - but why)?
-
 We'll benchmark and analyze the following libraries:
 
 * [JRE](#jre)
@@ -53,6 +46,13 @@ We'll benchmark and analyze the following libraries:
 * [Eclipse](#eclipse)
 * [HPPC](#hppc)
 * [Agrona](#agrona)
+
+Some of the questions we want to evaluate:
+
+* How does load factor affect performance?
+* How well does a JVM [Swiss Table](https://abseil.io/about/design/swisstables) (AndroidX) work?
+* How does the novel (AFAIK) hash finalizer in FastCollect compare to more standard hash finalizers?
+* How does the JRE HashMap compare to the more specialized libraries?
 
 You may note that several of the libraries benchmarked here are quite old and/or no longer maintained. Others are 
 not intended for general purpose usage. The larger purpose of this post is not to determine which is all-around 
@@ -67,10 +67,14 @@ affect hashtable performance.
 
 The only large scale benchmarking of primitive hashtables I could find in the past is
 [this article from 2014](https://dzone.com/articles/time-memory-tradeoff-example) by Roman Leventov (also the author of 
-Koloboke, and all-around hashtable expert). It's short, and worth a quick glance to observe how far behind the 
-performance of JRE HashMap was in this older benchmark - compare that to its performance today. Many of the 
-libraries benchmarked in that article are also benchmarked here (though some have changed names: HFTC → Koloboke, 
-Goldman Sachs → Eclipse).
+Koloboke). It's short, and worth a quick glance to observe how far behind the performance of JRE HashMap was in this
+older benchmark - compare that to its performance today. Many of the libraries benchmarked in that article are also
+benchmarked here (though some have changed names: HFTC → Koloboke, Goldman Sachs → Eclipse).
+
+There is also the 2017 paper
+[Empirical Study of Usage and Performance of Java Collections](https://research.spec.org/icpe_proceedings/2017/proceedings/p389.pdf),
+but the paper itself generally only shows nothing more detailed than a faster/slower comparison, and I was unable to 
+find the raw data referenced by the paper (I did not attempt to contact the authors in reference to the data).
 
 ## Hashtable Design Choices
 
@@ -1153,6 +1157,11 @@ explored however, what stands out?
     If it's necessary to enter the second tier however, JRE HashMaps cannot compete on speed (far more pointer 
     dereferencing required, and potentially non-linear memory access patterns depending on how the garbage collector 
     has arranged memory).
+  * In the 2014 benchmarks, HashMap was ~9x (very roughly eyeballed, don't take this too seriously) slower than 
+    Koloboke in GetHit scenarios. In today's benchmark, HashMap is only roughly ~2-3x slower! An impressive 
+    improvement over the years. We might expect improvements like
+    [Compressed Object Headers](https://openjdk.org/projects/lilliput/) (available since Java 24-25, but not in 21 
+    on which benchmarking was performed) to further reduce this distance.
 
 * AndroidX
   * The Swiss table design offers excellent GetMiss performance at larger sizes.
