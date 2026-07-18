@@ -14,36 +14,38 @@ library:
 
 Hashtables are one of the building blocks of computer science, and deservedly get a lot of attention - but less so
 within the JVM ecosystem. Part of this may simply be that most JVM code is not written with performance top of mind,
-or that the default JRE implementation is all-around quite reasonable - fast, efficient, resistant against attacks, why 
-fix it if it ain't broke? Today I'm interested in squeezing out every last byte and cycle of performance however, and 
-that means here I'm focusing on primitive hashtables.
+or that the default JRE implementation is all-around reasonable - fast, efficient, resistant against attacks, why 
+fix it if it ain't broke? Today we're looking at libraries that are interested in squeezing out every last byte and 
+cycle of performance however, and we'll be focusing specifically on primitive hashtables.
 
-If you need a hashtable with primitive keys and/or values, the default JRE HashMap will certainly work fine, but it's 
-hardly as efficient as it could be since it deals exclusively with references, which means boxing all your values.
-If we instead use primitive values rather than boxed references that means we can drop the costs of heap 
-allocation and pointer dereferencing, lower GC pressure, and hopefully come up with an analysis that will continue to
-hold weight with upcoming [Valhalla](https://openjdk.org/projects/valhalla/) changes to the JVM. On a selfish note,
-it's also simpler to benchmark primitive hashtables as we don't have to worry about things like
+If you need a hashtable with primitive keys and/or values, the default JRE HashMap will work fine, but since it 
+deals exclusively with references your keys and value will be boxed. This means a large amount of memory overhead, 
+and potentially additional CPU work (though as we'll see, modern JVMs have done a good job of driving this down).
+Using primitive values rather than boxed references allows dropping the costs of heap allocation and pointer
+dereferencing, as well as denser memory layouts and lower GC pressure. The hope is that any analysis here will 
+continue to hold weight with upcoming [Valhalla](https://openjdk.org/projects/valhalla/) changes to the JVM, which 
+will allow a much broader range of value objects. On a selfish note, it's also simpler to benchmark primitive 
+hashtables as we don't have to worry about things like
 [garbage collection rearranging arrays of references](https://shipilev.net/jvm/anatomy-quarks/11-moving-gc-locality/)
 underneath us mid-benchmark and how that might affect results...
 
-Hashtables that store values rather than references can provide a range of large performance benefits within the JVM,
-and to that end the JVM ecosystem has accumulated a handful of libraries that address this by providing hashtables 
-backed by primitive arrays. The problem is that the performance tradeoffs and design choices between them are neither
-obvious nor well-documented anywhere. Many different choices are made around hash functions, collision resolution 
-strategies, load factors, and those choices produce meaningfully different performance profiles yet there is pretty 
-much no modern data available on head-to-head performance. Let's rectify that.
+The JVM ecosystem has accumulated a handful of libraries that provide hashtables backed by primitive arrays in order
+to address these performance concerns. The problem is that the performance tradeoffs and design choices between them 
+are neither obvious nor well-documented anywhere. Many different choices are made around hash functions, collision 
+resolution strategies, load factors, and those choices produce meaningfully different performance profiles yet there 
+is pretty much no modern data available on head-to-head performance. The goal of this post is to rectify that.
 
-Some of the questions we'll get into later:
+Some of the questions we want to address:
+
 * How important are load factors and how do they affect performance?
 * How well does a JVM [Swiss Table](https://abseil.io/about/design/swisstables) port (AndroidX) work?
 * What's the effect of a novel (AFAIK) hash finalizer?
 * How well does the JRE HashMap hold up (spoiler: reasonably well - but why)?
 
-We'll benchmark and analyze the following libraries (links go to more detailed information lower down this page):
+We'll benchmark and analyze the following libraries:
 
 * [JRE](#jre)
-* [FastCollect](#fastcollect) (I am the author of FastCollect)
+* [FastCollect](#fastcollect) (I am also the author of FastCollect)
 * [Fastutil](#fastutil)
 * [AndroidX](#androidx)
 * [Trove](#trove)
@@ -52,26 +54,23 @@ We'll benchmark and analyze the following libraries (links go to more detailed i
 * [HPPC](#hppc)
 * [Agrona](#agrona)
 
-Libraries I did not benchmark:
-
-* Mahout Math - this appears to have almost entirely disappeared from the internet. There still exists a Maven 
-  Central artifact, but I cannot find source code anywhere.
-* [PrimitiveCollections](https://github.com/Speiger/Primitive-Collections) - this is mostly a personal project that
-  appears to be largely a copy of Fastutil.
-
 You may note that several of the libraries benchmarked here are quite old and/or no longer maintained. Others are 
 not intended for general purpose usage. The larger purpose of this post is not to determine which is all-around 
 fastest (and it's unlikely any one library could be characterized that way), but to investigate the design choices that 
-affect hashtable performance. Also note that the JRE is the only library here truly suited for external use (when an 
-attacker can control the table) - most of these libraries have abandoned any pretense at resisting DoS attacks in
-favor of raw performance.
+affect hashtable performance.
+
+> [!NOTE] Note
+> The JRE HashMap is the only hashtable here truly suited for external use (when an attacker can control the table).
+> Most of these libraries do not make any pretense at resisting DoS attacks and favor raw performance instead.
 
 ### Prior Benchmarks
 
 The only large scale benchmarking of primitive hashtables I could find in the past is
 [this article from 2014](https://dzone.com/articles/time-memory-tradeoff-example) by Roman Leventov (also the author of 
-Koloboke, and all-around hashtable expert). One of the most fascinating things to observe is how far behind the 
-performance of JRE HashMap is in this older benchmark - compare that to its performance today.
+Koloboke, and all-around hashtable expert). It's short, and worth a quick glance to observe how far behind the 
+performance of JRE HashMap was in this older benchmark - compare that to its performance today. Many of the 
+libraries benchmarked in that article are also benchmarked here (though some have changed names: HFTC → Koloboke, 
+Goldman Sachs → Eclipse).
 
 ## Hashtable Design Choices
 
@@ -92,33 +91,26 @@ principles lead to certain tradeoffs.
 ### Tradeoffs
 
 The highest level of tradeoff in hashtables can be characterized as time vs memory. Use more memory, and you can access
-entries in less time. Use less memory, and it takes more time to access entries. Easy, but also an extremely 
-simplified view of things. We can break this down further:
+entries in less time. Use less memory, and it takes more time to access entries. Easy, but also a pretty simplified 
+view of things. We can break this down further:
 
 1. The CPU cost of mapping a key to a slot (complexity of the hash function)
 2. The layout of slots in memory (open addressing vs separate chaining)
 3. If the original slot mapping is a collision slot:
    1. The CPU cost of searching colliding slots (probing strategy)
-   2. The number and pattern of memory accesses searching colliding slots (probing strategy, cache line effects, 
+   2. The number and pattern of memory accesses while searching colliding slots (probing strategy, cache line effects, 
       prefetching effects, TLB effects)
 4. Second order effects
-   1. Current load factor affects collision likelihood
-   2. Soft-deletion leaves behinds tombstones to reduce efficiency
-   3. Size of keys/values determines how many fit in a cache line / cache
-   4. Type of workload - reads vs write, hits vs misses
-   5. Key distributions
-   3. Etc, ad infinitum...
+   1. Current load factor affects collision rates
+   2. Key distributions affect collision rates
+   3. Soft-deletion leaves behinds tombstones to reduce efficiency
+   4. Size of keys/values determines how many fit in a cache line / cache
+   5. Type of workload - reads vs writes, hits vs misses
+   6. Etc, ad infinitum...
 
-As each of these effects can be different for any individual operation on a hashtable, we tend to think about them 
-in terms of mean and variance. Robin Hood hashing for example, is excellent at reducing variance - but what if it 
-increases the mean? There is no one answer or best approach, changing one element can affect all the rest. One thing 
-I have noted during benchmarking (and admittedly I am benchmarking on a relatively modern fast CPU), is that memory 
-effects seem to dominate hashtable performance in the libraries under test. The libraries that operate faster tend 
-to work with the hardware to achieve simple memory access patterns - complex CPU tricks do not seem to pay off as 
-much. An alternative way of looking at this is perhaps that the libraries under test have achieved pretty much all 
-the CPU gains reasonable, and thus are left working with memory effects to achieve performance?
-
-In any case, with that high-level framework in mind, let's dive into some quick definitions of terms.
+Each of these effects can vary on different invocations on the same hashtable, so the best to think about them is
+in terms of the cost + variance they introduce. With that high-level framework in mind, let's dive into some quick-ish 
+definitions.
 
 ### Open Addressing vs. Separate Chaining
 
@@ -135,6 +127,54 @@ an open-addressed table requires extra thought, and is discussed in more detail 
 be thought of a two tier approach, open addressing is a flat one tier approach.
 
 Every library in this benchmark except the JRE HashMap uses open addressing.
+
+### Probing Strategies
+
+When a key is mapped to a slot that is already occupied (a hash collision), it must be handled somehow. In the case of
+separate chaining, we simply add the new entry to the collection of entries already associated with the slot, but 
+separate chaining must search for other unoccupied slots to store the entry. The sequence of slots tried in the 
+search for an open slot is called the *probe sequence*, and its choice significantly impacts both throughput and 
+cache behavior.
+
+**[Linear probing](https://en.wikipedia.org/wiki/Linear_probing)** just tries consecutive slots: slot, slot+1, slot+2,
+and so on (wrapping around the table) until an open slot is found. It is maximally cache-friendly (sequential memory
+access) — but suffers from *primary clustering*: once a run of occupied slots forms, any key that hashes into that run
+lengthens it, creating a feedback loop that lengthens the run further and degrades performance as entries are put into
+slots further and further away from their home slot, and thus requiring longer and longer probe sequences on lookup.
+
+```
+State: [ ][ ][A][B][C][ ][ ]
+
+Insert D (hashes to slot 2): probe 2→3→4→5, insert at 5.
+State: [ ][ ][A][B][C][D][ ]
+
+Insert E (hashes to slot 5): probe 5→6, insert at 6. Cluster continues to grow...
+State: [ ][ ][A][B][C][D][E]
+```
+
+**[Quadratic probing](https://en.wikipedia.org/wiki/Quadratic_probing)** uses offsets slot+0², slot+1², slot+2²,
+slot+3²... (the probe number squared). It avoids primary clustering but can instead produce secondary clustering
+(keys with the same initial slot follow identical probe sequences) and over longer probe sequences results in more
+cache misses than linear probing.
+
+**[Double hashing](https://en.wikipedia.org/wiki/Double_hashing)** uses a second hash function to calculate the stride
+size based on the key: slot, slot+stride, slot+2\*stride, slot+3\*stride, etc. It avoids both primary and secondary
+clustering - the cost is computing two hash functions and the non-sequential memory access pattern which also
+results in additional cache misses.
+
+**[Robin Hood hashing](https://en.wikipedia.org/wiki/Hash_table#Robin_Hood_hashing)** is a refinement of linear probing
+that swaps entry positions (swapping a "poorer" \[further from its home slot\] entry with a "richer" \[closer to
+its home slot\] entry - hence Robin Hood) during insertion to reduce probe length variance. This tends to equalize
+probe lengths and allows much higher load factors without the worst-case blow-up of plain linear probing (Robin Hood
+hashtables are often run at load factors of 80%+ without much performance impact).
+
+And finally of course, you can have arbitrarily complex combinations of any probing scheme. A table could use linear
+probing for the first N elements, then switch to quadratic probing, or switch to linear probing with a different hash
+function, etc... The advantage to more complex probing schemes is that you can attempt to equalize the various pros
+and cons of each. For example, by starting with linear probing you can take advantage of its cache friendly behavior
+initially - linear probing for a cache line distance to avoid extra cache misses - then switch to quadratic probing
+when you're going to incur a cache miss anyway. The downside of these arbitrarily complex combinations is of course
+code complexity - but also entry removal, which can become very difficult (and we'll discuss later).
 
 ### Load Factor
 
@@ -185,64 +225,13 @@ of all elements) whenever the hashtable runs out of room. All hashtables benchma
 running out of space (some allow for tombstone-removal-only rehashes in the event that they use tombstones - covered
 later).
 
-### Probing Strategies
-
-When a key is mapped to a slot that is already occupied (a hash collision), it must be handled somehow. In the case of 
-separate chaining, we simply add the new entry to the collection of entries already associated with the slot, but what
-about open addressing?
-
-When a slot is occupied, the table must find another. The sequence of slots tried in the search for an open slot is
-called the *probe sequence*, and its choice significantly impacts both throughput and cache behavior.
-
-**[Linear probing](https://en.wikipedia.org/wiki/Linear_probing)** just tries consecutive slots: slot, slot+1, slot+2,
-and so on (wrapping around the table) until an open slot is found. It is maximally cache-friendly (sequential memory
-access) — but suffers from *primary clustering*: once a run of occupied slots forms, any key that hashes into that run
-lengthens it, creating a feedback loop that lengthens the run further and degrades performance as entries are put into
-slots further and further away from their home slot, and thus requiring longer and longer probe sequences on lookup.
-
-```
-State: [ ][ ][A][B][C][ ][ ]
-
-Insert D (hashes to slot 2): probe 2→3→4→5, insert at 5.
-State: [ ][ ][A][B][C][D][ ]
-
-Insert E (hashes to slot 5): probe 5→6, insert at 6. Cluster continues to grow...
-State: [ ][ ][A][B][C][D][E]
-```
-
-**[Quadratic probing](https://en.wikipedia.org/wiki/Quadratic_probing)** uses offsets slot+0², slot+1², slot+2²,
-slot+3²... (the probe number squared). It avoids primary clustering but can instead produce secondary clustering
-(keys with the same initial slot follow identical probe sequences) and over longer probe sequences results in more
-cache misses than linear probing.
-
-**[Double hashing](https://en.wikipedia.org/wiki/Double_hashing)** uses a second hash function to calculate the stride
-size based on the key: slot, slot+stride, slot+2\*stride, slot+3\*stride, etc. It avoids both primary and secondary
-clustering - the cost is computing two hash functions and the non-sequential memory access pattern which also
-results in additional cache misses.
-
-**[Robin Hood hashing](https://en.wikipedia.org/wiki/Hash_table#Robin_Hood_hashing)** is a refinement of linear probing
-that swaps entry positions (swapping a "poorer" \[further from its home slot\] entry with a "richer" \[closer to
-its home slot\] entry - hence Robin Hood) during insertion to reduce probe length variance. This tends to equalize
-probe lengths and allows much higher load factors without the worst-case blow-up of plain linear probing (Robin Hood
-hashtables are often run at load factors of 80%+ without much performance impact).
-
-And finally of course, you can have arbitrarily complex combinations of any probing scheme. A table could use linear
-probing for the first N elements, then switch to quadratic probing, or switch to linear probing with a different hash
-function, etc... The advantage to more complex probing schemes is that you can attempt to equalize the various pros
-and cons of each. For example, by starting with linear probing you can take advantage of its cache friendly behavior
-initially - linear probing for a cache line distance to avoid extra cache misses - then switch to quadratic probing
-when you're going to incur a cache miss anyway. The downside of these arbitrarily complex combinations is of course
-code complexity - but also entry removal, which can become very difficult.
-
 ### Hashtable Memory Layout
 
-
-
-At a minimum, hashtables need to store keys and values. When a hashtable stores more than just keys or values we tend
-to refer to that as metadata. An important decision point for hashtables is, what data do they require access to in 
-order to perform a lookup? Just keys? Keys and metadata? Mostly metadata, and occasionally keys?
-
-This is turn affects the decision of memory layouts:
+At a minimum, hashtables need to store keys and values. They can also associate extra metadata with keys/values - 
+often stored as a separate array if present. The overall goal for performance is to increase the memory density of 
+data required for lookup operations as much as possible. The question this leads to in hashtable design is then, 
+what data does your lookup require? Scan through keys, then load only the required value? Scan though metadata, 
+loading keys only if necssary, and then only the required value? Or scan through keys and values together?
 
 **Parallel arrays** maintain one array for keys and a separate array for values:
 
@@ -253,23 +242,25 @@ This is turn affects the decision of memory layouts:
 
 * table: \[k0]\[v0]\[k1]\[v1]\[k2]\[v2]\[k3]\[v3]...
 
-Note that interleaved storage can waste more space in order to achieve memory alignment if the keys and values are of
-different sizes.
+> [!NOTE] Note
+> If keys and values are not the same size then they will need to be padded to achieve interleaved storage. This
+> wastes space, and is difficult to achieve with the JVM anyway, so interleaved storage is generally only a
+> possibility when the keys and values are known to be the same size.
 
-Different layouts affects the density of different combinations of information - separate arrays offer the densest 
-layouts for the information in a single array, and thus the least cache misses. However, if a lookup requires 
-information from multiple arrays, then perhaps a parallel layout can offer a higher information density? 
+The density of data affects the number of cache misses during probe sequences, and thus directly affects performance.
 
 ### Metadata
 
 Some example of metadata stored by hashtables includes:
 
-[Robin Hood](https://en.wikipedia.org/wiki/Robin_Hood_hashing) hashtables may store probe sequence lengths (PSLs - how
-far a key is located from the slot it hashed to), and [Swiss tables](https://abseil.io/about/design/swisstables) 
-store key fingerprints. Given that the metadata is usually substantially smaller than the key size, metadata often
-cannot easily be interleaved with keys and is usually a separate array. If probing now requires accessing both metadata
-and keys this will incur many more cache misses, so when metadata is used, probing will almost always attempt to only
-access metadata (which is what makes key fingerprints so useful), and access keys only when absolutely necessary.
+* [Robin Hood](https://en.wikipedia.org/wiki/Robin_Hood_hashing) hashtables may store probe sequence lengths (PSLs - how
+far a key is located from the slot it hashed to).
+* [Swiss tables](https://abseil.io/about/design/swisstables) store key fingerprints.
+ 
+Given that the metadata is usually substantially smaller than the key size, metadata cannot easily be interleaved with
+keys and is usually a separate array. If probing now requires accessing both metadata and keys this will incur many 
+more cache misses, so when metadata is used, probing will almost always attempt to only access metadata (which is 
+what makes key fingerprints so useful), and access keys only when absolutely necessary.
 
 There are also hashtables that store indirect indices which point into separate key/value storage. This allows 
 key/value storage to be much denser than the main hashtable, potentially saving space, at the cost of an additional 
@@ -277,17 +268,13 @@ level of indirection. This might allow a hashtable to use a load factor of 50% o
 apply to a small metadata table, while keys/values are packed tightly. None of the hashtables being benchmarked use 
 this technique.
 
-Techniques that use larger amounts of metadata can payoff quite well - but they tend to be used in more general purpose
-hashtables which allow for storage of larger keys and values. When speaking of JVM primitives, which max out at 64 
-bits, a minimum of 32 bits of overhead is quite substantial...
-
 Finally, there is one more advantage to metadata - it can help with representing empty slots.
 
 ### Empty Slots
 
 We've discussed the various memory layouts and tradeoffs, but no matter which is used, a hashtable needs some way to
 indicate an empty slot, so that it knows where it can insert new entries or when it can stop probing during a lookup.
-The problem, of course, is that there is no guarantee any particular key value you might choose to represent
+The problem of course, is that there is no guarantee any particular key value you might choose to represent
 "unoccupied" won't be inserted! There are naturally many possible solutions to this.
 
 1. Enforce that the user provides an illegal key value which will always represent empty - the user can never insert
@@ -299,14 +286,13 @@ The problem, of course, is that there is no guarantee any particular key value y
    In the rest of the array, the empty key means an empty slot.
 4. If the user attempts to insert the empty key, choose a new empty key which is not present in the table, and update
    the table to use the new empty key before continuing the insertion.
-5. If using a metadata array, represent the empty slot in the metadata array. 
+5. If using a metadata array, represent the empty slot in the metadata array, not in the key array. 
 
-There are of course potential performance implications to all of these choices. If you need to add special cases,
-you'll add to code size - too large of a code block can prevent some JVM C2 compiler optimizations and also incur 
-more code cache misses. If you need to check a member variable this is an additional load and register usage. Too 
-much register usage can cause register spilling and commensurate performance impacts on the hot path. No matter the 
-choice there's always a variety of consequences to think through, and pretty much no way to anticipate the impact 
-except through benchmarking.
+There are potential performance implications to all of these choices. If you need to add special cases, you'll add 
+to code size - too large of a code block can prevent some JVM C2 compiler optimizations and also incur more code cache
+misses. If you need to check a member variable that's an additional load and register usage. Too much register usage
+lead to register spilling and commensurate performance impacts on the hot path. No matter the choice there's always a
+variety of consequences to think through, and pretty much no way to anticipate the impact except through benchmarking.
 
 ### Entry Removal
 
@@ -379,19 +365,11 @@ In order to construct hash functions with good uniformity and independence, we o
 
 **Avalanching**: Sensitivity to input changes - the ideal is that flipping a single bit in the input should cause 
 50% of the output bits to flip, and the bits that flip are effectively randomly chosen.
-**Bias**: Do any particular outputs or output patterns appear far often than they should (favoring some slots over 
+**Bias**: Do any particular outputs or output patterns appear more often than they should (favoring some slots over 
 others and thus increasing collisions)?
 **Entropy**: Another way of discussing avalanching and bias (avalanching means each output bit should have an 
 entropy close to 1 bit conditionally on a single input bit flip, bias means for N bit output, ideal entropy is N 
 bits) - essentially just reframing these in information-theoretic terms.
-
-It's important to remember however that these methods of evaluating the strength of a hash function are generally 
-predicated on the assumption that keys will be drawn from random input. If there are stronger guarantees on the key 
-space, then perhaps not all of these properties are useful. A common example of this, what if we can assume integer 
-keys can be mapped to [0-N) where N is the table size? This is not an uncommon assumption in many domains, and in 
-this case the identity hash function (i → i) is actually a perfect hash function - even though the identity hash 
-exhibits pretty much no independence (linear key relationships are preserved) and awful avalanching (flipping 1 bit of 
-input = 1 bit changed in output).
 
 #### Knuth Multiplicative Hashing
 
@@ -426,13 +404,23 @@ int hash(int k) {
 Knuth multiplicative hashing is only one hashing strategy however, and there exist many other possibilities, all 
 with their own lists of upsides and downsides.
 
-#### Losing Entropy In Slot Conversion
+#### Hash Functions vs Hashtable Needs
 
-So far we've discussed hashes as if each bit is equally important - we want to spread entropy around everywhere. But 
-in reality, when we convert a hash to an actual table slot (which ranges from 0-N), we're usually throwing away 
-everything except the lower bits. So in reality, entropy everywhere is not actually what we care about, entropy in 
-the bits we're going to use is what we care about. This is the realization that spurred the different hash function 
-in the FastCollect library (more detail in the FastCollect section).
+Hash functions are useful far beyond hashtables themselves - and so the goals for an ideal hash function may not 
+mesh perfectly with the requirements of a hashtable. This exhibits itself in two common ways:
+
+1) General purpose hash functions treat each bit as equally important - we want to spread entropy around everywhere. 
+   But in reality, when we convert a hash to an actual table slot (which ranges from 0-N), we're usually throwing away
+   everything except the lower bits. So in reality, entropy everywhere is not actually what hashtables care about, 
+   entropy in the bits the hashtable uses is more important. This is the realization that spurred the different hash 
+   function in the FastCollect library (more detail in the FastCollect section).
+2) Methods of evaluating the strength of a hash function are generally predicated on the assumption that keys will 
+   be drawn from random input. If there are stronger guarantees on the key space, then perhaps not all of these 
+   properties are useful. A common example of this, what if we can assume integer keys can be mapped to [0-N)? This 
+   is not an uncommon assumption in many hashtable domains, and in this case the identity hash function (i → i) is 
+   actually a perfect hash function for a hashtable - even though the identity hash exhibits pretty much no 
+   independence (linear key relationships are preserved) and awful avalanching (flipping 1 bit of input = 1 bit changed
+   in output).
 
 With that, our not-so-short recap of hashtable designs and tradeoffs is complete - let's move on to benchmarking!
 
@@ -442,6 +430,9 @@ With that, our not-so-short recap of hashtable designs and tradeoffs is complete
 * 6 Core AMD Ryzen 5 9600X - Windows 11
 * L1/L2/L3 Cache Sizes: 48KB/core, 1MB/core, 32MB shared
 * Temurin JDK 21.0.11
+
+Benchmarking code itself can be found at 
+[sooniln/jvm-collections-benchmarks](https://github.com/sooniln/jvm-collections-benchmarks).
 
 Benchmarks were run until standard deviation to mean ratios were at a reasonable level (usually < 15%), then the median 
 was used to score in order to avoid outliers.
@@ -464,10 +455,10 @@ force similar load factors for a more apples-to-apples comparison, or use the de
 unfairly advantage some implementations. Load factors have become an important part of hashtable design - it's a 
 valid choice to use a low load factor for performance and recover memory in other ways (by ensuring the load factor
 only affects the smaller metadata array and packing keys/value tightly outside the main array for example). However, 
-none of the hashtables benchmarked here appear to be applying any such memory optimizations, and in the interest of 
-similar comparisons we try to enforce that every hashtable has a load factor of at least 75% (higher is allowed). 
-There is one exception, Eclipse does not allow for load factor adjustments, and remains at 50%. We dig into the 
-performance implications of this later.
+none of the hashtables benchmarked here apply any such memory optimizations, and in the interest of similar 
+comparisons we try to enforce that every hashtable has a load factor of at least 75% (higher is allowed). There is one
+exception, Eclipse does not allow for load factor adjustments, and remains at 50% (and for this reason you'll note 
+some asterixing of Eclipse results). We'll dig into the performance implications of this later.
 
 | Library              | Default | Benchmarked | Adjustable |
 |----------------------|---------|-------------|------------|
@@ -545,7 +536,7 @@ exact pattern of hits/misses real world data gives you.
 In addition to the standard micro-benchmarking caveats, there are also hash table specific caveats. Notably, 
 hashtables that use tombstones for removal can have the tombstones substantially affect lookup times - but we 
 performed no benchmarking of removal + lookup scenarios. There are many other scenarios that could affect performance
-that were also uncovered in any benchmarking - it's impossible to cover everything.
+that were also not covered in any benchmarking - it's impossible to cover everything.
 
 ### Libraries Under Test
 
@@ -1155,25 +1146,54 @@ explored however, what stands out?
     in comparison to more specialized implementations. It performed more competitively for reads (where it was able to 
     perform relatively well given expectations), but worse for writes (where it was usually slower than most 
     implementations).
+  * JRE HashMap is generally extremely competitive with primitive hashtables when it comes to GetMiss scenarios 
+    (performing better than many of the libraries benchmarked), but is far slower than all other libraries in GetHit 
+    scenarios. I'd hypothesis this is due to the two tier memory structure employed by separate chaining tables - 
+    they are often able to skip entering the second tier of memory (the linked list) entirely in GetMiss scenarios. 
+    If it's necessary to enter the second tier however, JRE HashMaps cannot compete on speed (far more pointer 
+    dereferencing required, and potentially non-linear memory access patterns depending on how the garbage collector 
+    has arranged memory).
 
 * AndroidX
-  * Swiss table design offers excellent GetMiss performance at larger sizes...
-  * But overall, the SWAR (SIMD Within A Register) techniques used do not appear as performant as the true SIMD 
-    operations the original C++ implementation used.
-  * Has some interesting failure cases (highBits keys, and performance cliff at ~32M entries) - but while 
-    disappointing, it's unlikely these would cause real world issues for most usages.
+  * The Swiss table design offers excellent GetMiss performance at larger sizes.
+    * AndroidX is very fast at iterating through groups of 8 entries at a time, and it can check if those 8 entries 
+      may contain the lookup key in effectively a single operation. If a group of 8 entries may contain the key 
+      however, AndroidX has to use more expensive bit-twiddling techniques to confirm the match and then extract 
+      the correct entry.
+    * Even GetMiss performance is only advantageous outside the L2 cache regime (L3+). If the hashtable fits in L2 
+      cache, AndroidX tends to be slower than other tables even for GetMiss. I would hypothesize that below this size, 
+      a combination of shorter run lengths (less entries to iterate through) and cheap cache misses (loading the  
+      next entry hits L1/L2) means that AndroidX's geometric probing is at a disadvantage. Other libraries which use 
+      linear probing may also be benefiting more from prefetching?
+    * C++ is largely dominated by Swiss tables (and similar designs that use SIMD APIs) these days - Java isn't. 
+      Unfortunately today, 8 years after Swiss tables were first released and 12 years after 
+      [Project Panama](https://openjdk.org/projects/panama/) was introduced, Vector APIs are still an incubating 
+      feature in Java. In addition, while I haven't experimented with them myself, there are 
+      [some indications](https://bluuewhale.github.io/posts/further-optimizing-my-java-swiss-table/) that even 
+      the current incubating design is still slower than using bit-twiddling SWAR (SIMD In A Register) techniques 
+      when it comes to hashtable usage.
+    * Interestingly, for GetHit performance AndroidX is only competitive in the L3 cache regime. When the table 
+      either fits in L1/L2 or is larger than L3, AndroidX is substantially slower than other libraries. I do not 
+      have a good hypothesis to explain this behavior.
+  * In addition, AndroidX has some interesting failure cases (highBits keys, and performance cliff at ~32M entries) - 
+    but it's perhaps unlikely these would cause real world issues for most usages (who's loading 32M entries into a 
+    map on Android?).
 
 * Eclipse
   * Appeared exceptional at first, but once 50% load factor was taken into account was a bit more middle of the road.
+  * I was very interested to see how Eclipse's multiple probing strategies (3 different hash functions) would work. 
+    The answer appears to be, "reasonably well, but not exceptionally".
 
 * Fastutil/HPPC/Koloboke/Agrona
-  * All of these implement pretty much the same hashtable, with minor variations that lead to small variations in 
-    efficiency for various operations.
-  * Fastutil is by far the most battle-tested, but HPPC also impressed with performance.
+  * All of these libraries implement pretty much the same hashtable (linear probing, same hash finalizer, same 
+    memory layouts), with minor variations that lead to small differences in performance.
+  * Within this family, HPPC tends to generally be the fastest, and Agrona the slowest.
 
 * Trove
   * The only prime-sized table here - it's good to see and evaluate a different approach, but overall couldn't 
-    compete that well.
+    compete that well. It did perform exceptionally well with lowBits keys due to using the identity hash finalizer, 
+    but if we're specializing for lowBits keys I wonder if other table designs wouldn't out-perform it by using the 
+    identity hash as well.
 
 * FastCollect
   * Saved my own for last - overall I'm happy with the performance here.
@@ -1186,6 +1206,19 @@ explored however, what stands out?
     yet it performed very well. It's still possible someone with a deeper background than me could point out some 
     fatal flaw. I am curious about bringing this family of reversing hash finalizers to a simple linear probing 
     implementation - would that be even faster?
+  * A hashtable that does not enforce the Robin Hood invariant actually has more entries sitting at their home slots 
+    (since entries sitting at their home slots are considered "richest", and thus "stolen from" more often). This 
+    means that in GetHit scenarios, a non-RH table has (1) more entries that require only a single memory load since 
+    they are sitting at their home slot (2) entries that are not sitting at their home slot tend to require more 
+    probes to reach. However, since probe length increases logarithmically with table size (and since prefetching 
+    can make linear accesses cheaper), this may not be as large a disadvantage as it first appears... My overall 
+    takeaway is that Robin Hood tables may in the long run not be worth the trouble. I don't have perfect clarity on 
+    this, it's very unclear how much of a performance difference is coming from the RH invariant vs the different 
+    hash finalizer being used, and more experimentation is necessary.
+  * The additional variables / logic needed by Robin Hood hashing make it much harder to avoid register spilling in 
+    inlined methods on the hot path. It took quite some effort to arrange code to try and encourage C2 compilation 
+    patterns that avoided unnecessary register spilling and the commensurate performance impact. Simpler code that 
+    doesn't enforce Robin Hood invariants tends to reduce the likelihood of this occuring.
 
 In the end though, performance across all these libraries is respectable. It's difficult to imagine a scenario where 
 an additional ~2ns per lookup for example is really going to make an exceptional difference for production JVM code. On 
