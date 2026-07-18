@@ -136,7 +136,7 @@ Every library in this benchmark except the JRE HashMap uses open addressing.
 
 When a key is mapped to a slot that is already occupied (a hash collision), it must be handled somehow. In the case of
 separate chaining, we simply add the new entry to the collection of entries already associated with the slot, but 
-separate chaining must search for other unoccupied slots to store the entry. The sequence of slots tried in the 
+open addressing must search for other unoccupied slots to store the entry. The sequence of slots tried in the 
 search for an open slot is called the *probe sequence*, and its choice significantly impacts both throughput and 
 cache behavior.
 
@@ -235,7 +235,7 @@ At a minimum, hashtables need to store keys and values. They can also associate 
 often stored as a separate array if present. The overall goal for performance is to increase the memory density of 
 data required for lookup operations as much as possible. The question this leads to in hashtable design is then, 
 what data does your lookup require? Scan through keys, then load only the required value? Scan though metadata, 
-loading keys only if necssary, and then only the required value? Or scan through keys and values together?
+loading keys only if necessary, and then only the required value? Or scan through keys and values together?
 
 **Parallel arrays** maintain one array for keys and a separate array for values:
 
@@ -592,8 +592,8 @@ For the FastCollect finalizer the key realization is that simply reversing the o
 result puts the most entropy exactly where we want it, in the low bits. The problem is that while bit-reversal is a
 single instruction (RBIT) on ARM, x86-64 does not have a similar instruction. Divide and conquer + BSWAP approaches
 and similar can make bit-reversal reasonably cheap, but not single cycle cheap like RBIT. Since benchmarking is
-occurring on x86-64 we choose a slightly different approach: premix bits, multiply by PHI, and then reverse the
-bytes (not bits) with BSWAP/REV.
+occurring on x86-64 we choose a slightly different approach: premix bits with xor-right-shift, multiply by PHI, and 
+then reverse the bytes (not bits) with BSWAP/REV.
 
 ```java
 var h = (key ^ (key >>> 16)) * 0x9E3779B9;  // PHI
@@ -602,12 +602,9 @@ return Integer.reverseBytes(h);
 
 It would be very interesting to look into RBIT finalizers more on ARM platforms, it seems a much cheaper way of
 achieving higher levels of entropy in a targeted part of the bit pattern, rather than focusing on achieving even
-levels of entropy in all parts of the pattern (as more complex functions like murmur3, etc... appear to do). I am not
-aware of any hashtable implementations that have experimented with this, and it could be there are hidden weaknesses
-to this approach that I am not aware of.
-
-I am not aware of any prior hashtable implementations that take a similar approach. There is some usage of 
-bit-reversal in split-ordered maps, but this appears to be solving a slightly different problem at first glance.
+levels of entropy in all parts of the pattern (as more complex functions like murmur3 and so forth appear to do). As 
+far as I can tell, using bit/byte reversal with Knuth multiplicative hashing appears to be novel, but it could be there 
+are hidden weaknesses to this approach that I am not aware of.
 
 #### Fastutil
 
