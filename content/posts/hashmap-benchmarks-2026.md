@@ -1141,97 +1141,108 @@ on highBits keys, and this is visible in the final geometric mean results.
 
 ### Final Takeaways
 
-We've confirmed the basics - primitive hash tables can deliver large memory savings compared to the JRE HashMap, and 
-are often (but not always!) faster for many operations. In the several different primitive hashtable libraries we've 
-explored however, what stands out?
+We've confirmed the basics - hashtables specialized for primitives may deliver up to 3-6.5x memory savings and 2-3x CPU
+savings compared to the JRE HashMap. This isn't always guaranteed however - there are scenarios where the JRE 
+HashMap is competitive with the more specialized hashtables for CPU usage. In the several different libraries we've 
+explored, what stands out?
 
-* JRE
-  * The extra memory usage was obvious of course, but I was impressed at the performance the JRE HashMap delivered 
-    in comparison to more specialized implementations. It performed more competitively for reads (where it was able to 
-    perform relatively well given expectations), but worse for writes (where it was usually slower than most 
-    implementations).
+#### JRE
+
   * JRE HashMap is generally extremely competitive with primitive hashtables when it comes to GetMiss scenarios 
     (performing better than many of the libraries benchmarked), but is far slower than all other libraries in GetHit 
     scenarios. I'd hypothesis this is due to the two tier memory structure employed by separate chaining tables - 
     they are often able to skip entering the second tier of memory (the linked list) entirely in GetMiss scenarios. 
-    If it's necessary to enter the second tier however, JRE HashMaps cannot compete on speed (far more pointer 
-    dereferencing required, and potentially non-linear memory access patterns depending on how the garbage collector 
-    has arranged memory).
+    If it's necessary to enter the second tier (GetHit and Put scenarios) however, JRE HashMaps cannot compete on speed 
+    (far more pointer dereferencing required, and likely non-linear memory access patterns depending on how  
+    the garbage collector has arranged memory).
   * In the 2014 benchmarks, HashMap was ~9x (very roughly eyeballed, don't take this too seriously) slower than 
     Koloboke in GetHit scenarios. In today's benchmark, HashMap is only roughly ~2-3x slower! An impressive 
-    improvement over the years. We might expect improvements like
+    improvement over the years. We might expect efforts like
     [Compressed Object Headers](https://openjdk.org/projects/lilliput/) (available since Java 24-25, but not in 21 
     on which benchmarking was performed) to further reduce this distance.
 
-* AndroidX
-  * The Swiss table design offers excellent GetMiss performance at larger sizes.
+#### FastCollect
+
+* I originally chose to implement Robin Hood hashing for the fun of it - there's a certain elegance about it, and I was 
+  unfamiliar with it. While it's worked out quite well, I am unsure that Robin Hood hashing is worth it in the 
+  long run. There are certainly scenarios it shines in, but I think for maximum performance simple linear probing 
+  without any hoopla may get closer to allowing the hardware to operate the way it wants to with maximum performance.
+  Linear scanning through memory is hard to beat.
+* Simple linear probing without Robin Hood actually has more entries sitting at their home slots than a Robin Hood
+  table (since entries sitting at their home slots are considered "richest", and thus "stolen from" more often). This
+  means that in GetHit scenarios, a non-RH table has (1) more entries that require only a single memory load since
+  they are sitting at their home slot (2) entries that are not sitting at their home slot tend to require more
+  probes to reach. However, since probe length increases logarithmically with table size (and since prefetching
+  can make linear accesses cheaper), this may not be as large a disadvantage as it first appears... My overall
+  takeaway is that Robin Hood tables may in the long run not be worth the trouble, but I don't have perfect clarity on
+  this. It's very unclear how much of a performance difference is coming from the RH invariant vs the different
+  hash finalizer being used, and more experimentation is necessary.
+* The idea of using bit/byte reversal in the hash finalizer appears to have been validated, as it out-performed more 
+  standard finalizers for FastCollect specifically. As far as I can determine, this appears to be novel (I couldn't
+  find any information on any other implementations using this technique), yet it performed very well. It's still
+  possible someone with a deeper background in hashing than me could point out some fatal flaw. I am curious about
+  bringing this family of bit-reversing hash finalizers to a simple linear probing implementation - would that be 
+  even faster?
+* The additional variables / logic needed by Robin Hood hashing make it much harder to avoid register spilling in
+  inlined methods on the hot path. It took quite some effort to arrange code to try and encourage C2 compilation
+  patterns that avoided unnecessary register spilling and the commensurate performance impact. Simpler code that
+  doesn't enforce Robin Hood invariants tends to reduce the likelihood of this scenario occurring.
+* Overall FastCollect's performance was among the fastest benchmarked, but there are avenues for further exploration.
+
+#### AndroidX
+
+  * The AndroidX Swiss table design is clearly excellent for GetMiss scenarios at larger sizes, but average or poor at 
+    most others. GetMiss demonstrates AndroidX's strengths:
     * AndroidX is very fast at iterating through groups of 8 entries at a time, and it can check if those 8 entries 
       may contain the lookup key in effectively a single operation. If a group of 8 entries may contain the key 
       however, AndroidX has to use more expensive bit-twiddling techniques to confirm the match and then extract 
       the correct entry.
-    * Even GetMiss performance is only advantageous outside the L2 cache regime (L3+). If the hashtable fits in L2 
-      cache, AndroidX tends to be slower than other tables even for GetMiss. I would hypothesize that below this size, 
-      a combination of shorter run lengths (less entries to iterate through) and cheap cache misses (loading the  
+    * Even so, GetMiss performance is only advantageous outside the L2 cache regime (L3+). If the hashtable fits in L2 
+      cache, AndroidX tends to be slower than other tables for GetMiss. I would hypothesize that below this size, 
+      a combination of shorter run lengths (fewer entries to iterate through) and cheap cache misses (loading the  
       next entry hits L1/L2) means that AndroidX's geometric probing is at a disadvantage. Other libraries which use 
       linear probing may also be benefiting more from prefetching?
-    * C++ is largely dominated by Swiss tables (and similar designs that use SIMD APIs) these days - Java isn't. 
-      Unfortunately today, 8 years after Swiss tables were first released and 12 years after 
-      [Project Panama](https://openjdk.org/projects/panama/) was introduced, Vector APIs are still an incubating 
-      feature in Java. In addition, while I haven't experimented with them myself, there are 
-      [some indications](https://bluuewhale.github.io/posts/further-optimizing-my-java-swiss-table/) that even 
-      the current incubating design is still slower than using bit-twiddling SWAR (SIMD In A Register) techniques 
-      when it comes to hashtable usage.
-    * Interestingly, for GetHit performance AndroidX is only competitive in the L3 cache regime. When the table 
-      either fits in L1/L2 or is larger than L3, AndroidX is substantially slower than other libraries. I do not 
-      have a good hypothesis to explain this behavior.
+  * C++ is largely dominated by Swiss tables (and similar designs that use SIMD APIs) these days - Java isn't. 
+    Unfortunately today, 8 years after Swiss tables were first released and 12 years after 
+    [Project Panama](https://openjdk.org/projects/panama/) was introduced, Vector APIs are still an incubating 
+    feature in Java. In addition, while I haven't experimented with them myself, there are 
+    [some indications](https://bluuewhale.github.io/posts/further-optimizing-my-java-swiss-table/) that even 
+    the current incubating design is still slower than using bit-twiddling SWAR (SIMD In A Register) techniques 
+    when it comes to hashtable usage.
+  * Interestingly, for GetHit performance AndroidX is only competitive in the L3 cache regime. When the table 
+    either fits in L1/L2 or is larger than L3, AndroidX is substantially slower than other libraries. I do not 
+    have a good hypothesis to explain this behavior.
   * In addition, AndroidX has some interesting failure cases (highBits keys, and performance cliff at ~32M entries) - 
     but it's perhaps unlikely these would cause real world issues for most usages (who's loading 32M entries into a 
     map on Android?).
 
-* Eclipse
-  * Appeared exceptional at first, but once 50% load factor was taken into account was a bit more middle of the road.
-  * I was very interested to see how Eclipse's multiple probing strategies (3 different hash functions) would work. 
-    The answer appears to be, "reasonably well, but not exceptionally".
+#### Eclipse
 
-* Fastutil/HPPC/Koloboke/Agrona
-  * All of these libraries implement pretty much the same hashtable (linear probing, same hash finalizer, same 
-    memory layouts), with minor variations that lead to small differences in performance.
-  * Within this family, HPPC tends to generally be the fastest, and Agrona the slowest.
+  * Eclipse's performance appeared exceptional, but as we investigated it became clear that this was entirely 
+    due to using a much lower maximum load factor than any other library. Once this was accounted for, Eclipse 
+    was reasonably in the middle of the pack.
+  * I was very interested to see how Eclipse's multiple probing strategies (3 different hash functions) would work out. 
+    The idea of first attempting the identity hash for half a cache line before switching to a more rigorous 
+    finalizer seems like it could pay dividends, but at least for Eclipse it does not appear to have been a game 
+    changer.
 
-* Trove
-  * The only prime-sized table here - it's good to see and evaluate a different approach, but overall couldn't 
-    compete that well. It did perform exceptionally well with lowBits keys due to using the identity hash finalizer, 
-    but if we're specializing for lowBits keys I wonder if other table designs wouldn't out-perform it by using the 
-    identity hash as well.
+#### Fastutil/HPPC/Koloboke/Agrona
 
-* FastCollect
-  * Saved my own for last - overall I'm happy with the performance here.
-  * I'm unconvinced that Robin Hood hashing is super effective. There are certainly scenarios it shines in, but I 
-    think for maximum performance simple linear probing without any hoopla (as implemented by Fastutil) gets closer 
-    to allowing the hardware to operate the way it wants to with maximum performance. Linear scanning through memory 
-    is hard to beat, and it's unclear that the Robin Hood extras on top of that are helping much.
-  * I'm quite happy this validated my idea of bit/byte reversal in the hash finalizer. As far as I can determine, 
-    this appears to be novel (I couldn't find any other information on any implementations using this technique), 
-    yet it performed very well. It's still possible someone with a deeper background than me could point out some 
-    fatal flaw. I am curious about bringing this family of reversing hash finalizers to a simple linear probing 
-    implementation - would that be even faster?
-  * A hashtable that does not enforce the Robin Hood invariant actually has more entries sitting at their home slots 
-    (since entries sitting at their home slots are considered "richest", and thus "stolen from" more often). This 
-    means that in GetHit scenarios, a non-RH table has (1) more entries that require only a single memory load since 
-    they are sitting at their home slot (2) entries that are not sitting at their home slot tend to require more 
-    probes to reach. However, since probe length increases logarithmically with table size (and since prefetching 
-    can make linear accesses cheaper), this may not be as large a disadvantage as it first appears... My overall 
-    takeaway is that Robin Hood tables may in the long run not be worth the trouble. I don't have perfect clarity on 
-    this, it's very unclear how much of a performance difference is coming from the RH invariant vs the different 
-    hash finalizer being used, and more experimentation is necessary.
-  * The additional variables / logic needed by Robin Hood hashing make it much harder to avoid register spilling in 
-    inlined methods on the hot path. It took quite some effort to arrange code to try and encourage C2 compilation 
-    patterns that avoided unnecessary register spilling and the commensurate performance impact. Simpler code that 
-    doesn't enforce Robin Hood invariants tends to reduce the likelihood of this occuring.
+  * All of these libraries implement pretty much the same hashtable design (linear probing, same hash finalizer, same 
+    memory layouts), with only minor variations that lead to small differences in performance.
+  * Within this family of table, HPPC tends to generally be the fastest and Agrona the slowest. This appears to be 
+    more due to smaller differences in implementation rather than anything algorithmic.
 
-In the end though, performance across all these libraries is respectable. It's difficult to imagine a scenario where 
-an additional ~2ns per lookup for example is really going to make an exceptional difference for production JVM code. On 
-the other hand, if you do have such a scenario, hopefully this benchmark has been useful! 
+#### Trove
+
+  * The only prime-sized table here - it's good to see and evaluate a different approach, but overall it couldn't 
+    really compete with the other libraries. Trove did perform exceptionally well with lowBits keys due to using the 
+    identity hash finalizer, but if we're specializing for lowBits keys I suspect other table designs would
+    out-perform Trove by using the identity hash as well.
+
+In the end, performance across all these libraries is respectable. The larger benefit is memory savings - the
+secondary benefit is CPU savings. And while it's quite entertaining to squeeze every bit of performance possible out of
+these tables, the vast majority of code written in the JVM ecosystem is unlikely to care.
 
 ## All Results
 
