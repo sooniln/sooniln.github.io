@@ -53,6 +53,12 @@ theme = 'FixIt'
   [params.cookieconsent]
     enable = false
 
+  [params.codeblock]
+    lineNosToggler = false
+    lineWrapToggler = false
+    copyable = false
+    max_shown_lines = 50
+
 [markup.highlight]
   # ~~~~~~~~~~ necessary configurations ~~~~~~~~~~
   # https://github.com/hugo-fixit/FixIt/issues/43
