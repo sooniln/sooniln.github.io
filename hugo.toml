@@ -53,6 +53,13 @@ theme = 'FixIt'
   [params.cookieconsent]
     enable = false
 
+[markup.highlight]
+  # ~~~~~~~~~~ necessary configurations ~~~~~~~~~~
+  # https://github.com/hugo-fixit/FixIt/issues/43
+  codeFences = true
+  noClasses = false
+  # ~~~~~~~~~~ necessary configurations ~~~~~~~~~~
+
 [markup.goldmark.extensions.passthrough]
   enable = true
   [markup.goldmark.extensions.passthrough.delimiters]
