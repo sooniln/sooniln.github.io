@@ -1,6 +1,6 @@
 ---
 title: "Comprehensive JVM Primitive Hashtable Benchmarks 2026"
-date: 2026-07-18
+date: 2026-07-19
 draft: false
 math: true
 library:
@@ -73,8 +73,8 @@ benchmarked here (though some have changed names: HFTC → Koloboke, Goldman Sac
 
 There is also the 2017 paper
 [Empirical Study of Usage and Performance of Java Collections](https://research.spec.org/icpe_proceedings/2017/proceedings/p389.pdf),
-but the paper itself generally only shows nothing more detailed than a faster/slower comparison, and I was unable to 
-find the raw data referenced by the paper (I did not attempt to contact the authors in reference to the data).
+but the paper only shows a faster/slower comparison. I was unable to find the raw data referenced by the paper, but did
+not attempt to contact the authors in reference to the data.
 
 ## Hashtable Design Choices
 
@@ -112,7 +112,7 @@ view of things. We can break this down further:
    5. Type of workload - reads vs writes, hits vs misses
    6. Etc, ad infinitum...
 
-Each of these effects can vary on different invocations on the same hashtable, so the best to think about them is
+Each of these effects can vary on different invocations on the same hashtable, so the best way to think about them is
 in terms of the cost + variance they introduce. With that high-level framework in mind, let's dive into some quick-ish 
 definitions.
 
@@ -997,8 +997,8 @@ if they aren't careful with proper pre-sizing so that iteration is not artificia
 Indeed, FastCollect suffers the same problem as well (to an even greater degree, given that maintaining the Robin 
 Hood invariant requires extra work during insertion), but takes a slightly different approach. Any linear probing 
 approach means we can expect calculable upper bounds on maximum run length for various map sizes (while there are 
-indeed formulas to calculate this, see https://www.cs.tau.ac.il//~zwick/Adv-Alg-2015/Linear-Probing.pdf for more 
-information, I skipped that and simply used Monte Carlo simulations). I.e. given a map with a backing array of 
+indeed formulas to calculate this - see https://www.cs.tau.ac.il//~zwick/Adv-Alg-2015/Linear-Probing.pdf for more 
+information - I skipped that and simply used Monte Carlo simulations). I.e. given a map with a backing array of 
 length 65536 which is ~83.3% full, we would expect VERY roughly a maximum run length (consecutive non-empty slots) 
 of ~500 at the 99.9th percentile. So if we see a run length > 500 in a map of that size, it's extraordinarily likely
 that something is going drastically wrong. And further, if we're in the accidentally quadratic re-insertion 
@@ -1164,11 +1164,10 @@ specialized hashtables for CPU usage. In the several different libraries we've e
 
 JRE HashMap is generally extremely competitive with primitive hashtables when it comes to GetMiss scenarios 
 (performing better than many of the libraries benchmarked), but is far slower than all other libraries in GetHit 
-scenarios. I'd hypothesis this is due to the two tier memory structure employed by separate chaining tables - 
+scenarios. I'd hypothesize this is due to the two tier memory structure employed by separate chaining tables - 
 they are often able to skip entering the second tier of memory (the linked list) entirely in GetMiss scenarios. 
 If it's necessary to enter the second tier (GetHit and Put scenarios) however, JRE HashMaps cannot compete on speed 
-(far more pointer dereferencing required, and likely non-linear memory access patterns depending on how the 
-garbage collector has arranged memory).
+(far more pointer dereferencing required, and likely non-linear memory access patterns).
 
 In the 2014 benchmarks, HashMap was ~9x (very roughly eyeballed, don't take this too seriously) slower than 
 Koloboke in GetHit scenarios. In today's benchmark, HashMap is only roughly ~2-3x slower! An impressive 
@@ -1180,13 +1179,16 @@ on which benchmarking was performed) to further reduce this distance.
 
 #### FastCollect
 
-I originally chose to implement Robin Hood hashing for the fun of it - there's a certain elegance about it, and I was 
-unfamiliar with it. While it's worked out quite well, I am unsure that Robin Hood hashing is worth it in the 
-long run. There are certainly scenarios it shines in, but I think for maximum performance simple linear probing 
-without any hoopla may get closer to allowing the hardware to operate the way it wants to with maximum performance.
-Linear scanning through memory is hard to beat.
+FastCollect performed quite well, beaten only by AndroidX at larger sizes in read geomean performance, and held 
+close to the fastest libraries in write geomean performance. In a separate build at 50% max load factor, FastCollect 
+was the fastest of all libraries in read scenarios. I originally chose to implement Robin Hood hashing for the fun of
+it - there's a certain elegance about the idea, and I was unfamiliar with it. While it's worked out quite well, I am
+unsure that Robin Hood hashing is worth it in the long run. There are certainly scenarios it shines in, but I think
+for maximum performance simple linear probing without any hoopla may get closer to allowing the hardware to operate
+the way it wants to with maximum performance. Linear scanning through memory is hard to beat. The only way to be 
+sure will be to write a linear probing implementation...
 
-Simple linear probing without Robin Hood actually has more entries sitting at their home slots than a Robin Hood
+Simple linear probing results in tables that have more entries sitting at their home slots than a Robin Hood
 table (since entries sitting at their home slots are considered "richest", and thus "stolen from" more often). This
 means that in GetHit scenarios, a non-RH table has (1) more entries that require only a single memory load since
 they are sitting at their home slot (2) entries that are not sitting at their home slot tend to require more
@@ -1196,19 +1198,14 @@ takeaway is that Robin Hood tables may in the long run not be worth the trouble,
 this. It's very unclear how much of a performance difference is coming from the RH invariant vs the different
 hash finalizer being used, and more experimentation is necessary.
 
-The idea of using bit/byte reversal in the hash finalizer appears to have been validated, as it out-performed more 
-standard finalizers for FastCollect specifically. As far as I can determine, this appears to be novel (I couldn't
-find any information on any other implementations using this technique), yet it performed very well. It's still
-possible someone with a deeper background in hashing than me could point out some fatal flaw. I am curious about
-bringing this family of bit-reversing hash finalizers to a simple linear probing implementation - would that be 
-even faster?
+The idea of using bit/byte reversal in the hash finalizer appears to have been validated, as this approach
+out-performed more standard finalizers for FastCollect specifically. As far as I can determine, this approach appears
+to be novel (I couldn't find any information on any other implementations using this technique). It's still possible
+someone with a deeper background in hashing than me could point out some fatal flaw. I am curious about benchmarking
+this family of bit-reversing hash finalizers in a simple linear probing implementation - would that be 
+even faster? Worth experimenting with.
 
-The additional variables / logic needed by Robin Hood hashing make it much harder to avoid register spilling in
-inlined methods on the hot path. It took quite some effort to arrange code to try and encourage C2 compilation
-patterns that avoided unnecessary register spilling and the commensurate performance impact. Simpler code that
-doesn't enforce Robin Hood invariants tends to reduce the likelihood of this scenario occurring.
-
-Overall FastCollect's performance was among the fastest benchmarked, but there are avenues for further exploration.
+Overall FastCollect's performance was among the faster libraries, but there are avenues for further exploration.
 
 ---
 
@@ -1239,7 +1236,7 @@ Interestingly, for GetHit performance AndroidX is only competitive in the L3 cac
 either fits in L1/L2 or is larger than L3, AndroidX is substantially slower than other libraries. I do not 
 have a good hypothesis to explain this behavior.
 
-In addition, AndroidX has some interesting failure cases (highBits keys, and performance cliff at ~32M entries) - 
+Finally, AndroidX has some interesting failure cases (highBits keys, and the performance cliff at ~32M entries) - 
 but it's perhaps unlikely these would cause real world issues for most usages (who's loading 32M entries into a 
 map on Android?).
 
@@ -1253,7 +1250,7 @@ was reasonably in the middle of the pack.
 
 I was very interested to see how Eclipse's multiple probing strategies (3 different hash functions) would work out. 
 The idea of first attempting the identity hash for half a cache line before switching to a more rigorous 
-finalizer seems like it could pay dividends, but at least for Eclipse it does not appear to have been a game 
+finalizer seems like it could pay dividends, but at least for Eclipse, it doesn't appear to have been a game 
 changer.
 
 ---
@@ -1264,7 +1261,7 @@ All of these libraries implement pretty much the same hashtable design (linear p
 memory layouts), with only minor variations that lead to small differences in performance.
 
 Within this family of tables, HPPC tends to generally be the fastest and Agrona the slowest. This appears to be 
-more due to smaller differences in implementation rather than anything algorithmic.
+more due to small differences in implementation rather than anything algorithmic.
 
 ---
 
@@ -1274,7 +1271,7 @@ The only prime-sized table here - it's good to see and evaluate a different appr
 really compete with the other libraries, and was frequently even outperformed by the JRE HashMap. Trove did perform 
 exceptionally well with lowBits keys due to using the identity hash finalizer, but if we're specializing for
 lowBits keys I suspect other table designs would out-perform Trove by using the identity hash as well. Trove's  
-general lack of performance appears to have been noted as early as 2017[^1].
+general lack of performance appears to have been noted as early as 2017[^1] as well.
 
 [^1]: Diego Costa, Artur Andrzejak, Janos Seboek, and David Lo. 2017. Empirical Study of Usage and Performance of 
 Java Collections. In Proceedings of the 8th ACM/SPEC on International Conference on Performance Engineering (ICPE '17).
