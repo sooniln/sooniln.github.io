@@ -1397,7 +1397,7 @@ https://doi.org/10.1145/3030207.3030221
 In the end, performance across all these libraries is respectable (except perhaps Trove, which often performs worse 
 than the standard JRE HashMap). The larger benefit is memory savings - the secondary benefit is CPU savings. And 
 while it's quite entertaining to squeeze every bit of performance possible out of these tables, the vast majority of 
-code written in the JVM ecosystem is unlikely to care.
+code written in the JVM ecosystem (outside of scientific and high-performance computing) is unlikely to care.
 
 ## All Results
 
