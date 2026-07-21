@@ -46,6 +46,7 @@ We'll benchmark and analyze the following libraries:
 * [Eclipse](#eclipse)
 * [HPPC](#hppc)
 * [Agrona](#agrona)
+* [LibGDX](#libgdx)
 
 Some of the questions we want to evaluate:
 
@@ -818,6 +819,34 @@ return h ^ (h >>> 16);
 
 ---
 
+#### LibGDX
+
+LibGDX is a cross-platform game development library, which as part of its utilities provides some primitive 
+collection implementations. It uses a default max load factor of 80%, which is higher than often found in linear 
+probing implementations.
+
+Note: LibGDX does not have a Long → Int map with primitive values, benchmarking uses Long → boxed<Int> maps instead. 
+Be wary of apples to apples comparisons.
+
+**Source**: [libgdx/libgdx](https://github.com/libgdx/libgdx)
+**Maven**: `com.badlogicgames.gdx:gdx:1.14.2`  
+**Last release**: June 2026
+
+* **Storage Schema**: Power-of-two sized, parallel arrays for keys/values
+* **Probing Strategy**: Linear probing
+* **Removal Strategy**: Backwards-shift deletion
+* **Default Max Load Factor**: 80%
+
+**Integer key hash finalizer**: 64-bit widened Fibonacci hashing with size-based shift. This implementation of 
+Fibonacci hashing is more true to the original variant proposed by Knuth in that it uses a table size based shift. 
+The widening to a long helps increase entropy across the returned low bits more than the 32-bit version would.
+
+```java
+return (int)(key * 0x9E3779B97F4A7C15L >>> Integer.countLeadingZeros(size - 1));
+```
+
+---
+
 ## Benchmarks
 
 Raw benchmark data can be downloaded [here](/libraries.csv).
@@ -860,9 +889,9 @@ misses equally, an assumption which may not be true in various real world worklo
 
 Geomeans across all sizes (lower is better):
 
-|                  | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |  HPPC |    JRE | Koloboke |  Trove |
-|------------------|-------:|---------:|--------:|------------:|---------:|------:|-------:|---------:|-------:|
-| Geomean (random) | 12.537 |    8.681 |  5.421* |       8.442 |   10.475 | 9.274 | 11.858 |   11.060 | 17.717 |
+|                  | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |  HPPC |    JRE | Koloboke | LibGDX |  Trove |
+|------------------|-------:|---------:|--------:|------------:|---------:|------:|-------:|---------:|-------:|-------:|
+| Geomean (random) | 12.537 |    8.681 |  5.421* |       8.442 |   10.475 | 9.274 | 11.858 |   11.060 |  9.578 | 17.717 |
 
 As this is the first graph we're looking at, note the distinct regime changes as the hashtable size increases past
 L1/L2/L3 cache sizes. For many of the power-of-two sized graphs we see the distinct sawtooth performance that comes
@@ -884,9 +913,9 @@ using an unfairly lower (for comparison purposes) load factor? We'll dig into th
 
 Geomeans across all sizes (lower is better):
 
-|                   | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |  HPPC |   JRE | Koloboke | Trove |
-|-------------------|-------:|---------:|--------:|------------:|---------:|------:|------:|---------:|------:|
-| Geomean (lowBits) | 12.554 |    7.734 |  2.969* |       6.521 |    9.390 | 8.877 | 7.100 |    9.454 | 5.313 |
+|                   | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |  HPPC |   JRE | Koloboke | LibGDX | Trove |
+|-------------------|-------:|---------:|--------:|------------:|---------:|------:|------:|---------:|-------:|------:|
+| Geomean (lowBits) | 12.554 |    7.734 |  2.969* |       6.521 |    9.390 | 8.877 | 7.100 |    9.454 |  5.268 | 5.313 |
 
 Recall that lowBits keys concentrate their entropy in the lower bits, which is where most of these tables calculate 
 slot positions from. The biggest change we see here is with Trove performance (it was one of the slowest for random 
@@ -894,13 +923,16 @@ keys, but is now among the fastest for lowBits keys). As covered earlier, Trove 
 "perfect" for lowBits keys), so it is unsurprising that it performs so well with them. Eclipse also improves its 
 performance - Eclipse's first choice of hash finalizer is also the identity hash.
 
+LibGDX also performs quite well, beating Trove for most of the size range, until larger sizes. Fibonacci hashing
+without modifications performs quite well.
+
 {{< benchmark-chart benchmark="Map.readGM" order="highBits" title="Map Read Geometric Mean — highBits keys" >}}
 
 Geomeans across all sizes (lower is better):
 
-|                    | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |   HPPC |    JRE | Koloboke |  Trove |
-|--------------------|-------:|---------:|--------:|------------:|---------:|-------:|-------:|---------:|-------:|
-| Geomean (highBits) | 12.619 |   71.019 |  8.944* |       6.565 |   18.002 | 61.927 | 17.151 |   18.079 | 18.083 |
+|                    | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |   HPPC |    JRE | Koloboke | LibGDX |  Trove |
+|--------------------|-------:|---------:|--------:|------------:|---------:|-------:|-------:|---------:|-------:|-------:|
+| Geomean (highBits) | 12.619 |   71.019 |  8.944* |       6.565 |   18.002 | 61.927 | 17.151 |   18.079 |  6.464 | 18.083 |
 
 Recall that highBits keys concentrate their entropy in the higher bits, which most of these tables ignore in order 
 to calculate slot positions. So we expect this to be an interesting "adversarial" order, and the results bear that 
@@ -914,8 +946,8 @@ Interestingly, if we look at JRE performance, not only is it quite reasonable at
 brought to its knees at higher sizes), it's possible that we're able to see the effect of JRE's red-black tree fallback
 ameliorating the performance hit at larger sizes (though I have not confirmed that's what's actually happening here)?
 
-FastCollect performs sufficiently well with highBits keys that it is able to out-perform even Eclipse, though 
-Eclipse is operating at a load factor of 50% and FastCollect at 83%.
+FastCollect and LibGDX perform sufficiently well with highBits keys that they are able to out-perform even Eclipse, 
+though Eclipse is operating at a load factor of 50% and FastCollect/LibGDX at 83/80%.
 
 #### Write Performance
 
@@ -927,9 +959,9 @@ not be true in various real world workloads. Results for the three orderings (ra
 
 Geomeans across all sizes (lower is better):
 
-|                  | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |   HPPC |    JRE | Koloboke |  Trove |
-|------------------|-------:|---------:|--------:|------------:|---------:|-------:|-------:|---------:|-------:|
-| Geomean (random) | 18.426 |   19.661 | 12.412* |      16.997 |   18.612 | 13.792 | 31.936 |   16.535 | 31.215 |
+|                  | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |   HPPC |    JRE | Koloboke | LibGDX |  Trove |
+|------------------|-------:|---------:|--------:|------------:|---------:|-------:|-------:|---------:|-------:|-------:|
+| Geomean (random) | 18.426 |   19.661 | 12.412* |      16.997 |   18.612 | 13.792 | 31.936 |   16.535 | 18.161 | 31.215 |
 
 We immediately see some patterns which look the same as from the read results, and note that AndroidX again hits a 
 performance cliff and times out at higher sizes. JRE is less competitive for writes than reads it would also appear,
@@ -940,20 +972,22 @@ that Eclipse is operating at a different load factor than all the other librarie
 
 Geomeans across all sizes (lower is better):
 
-|                   | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |   HPPC |    JRE | Koloboke |  Trove |
-|-------------------|-------:|---------:|--------:|------------:|---------:|-------:|-------:|---------:|-------:|
-| Geomean (lowBits) | 18.397 |   19.466 |  7.972* |      12.913 |   16.549 | 13.206 | 20.959 |   15.448 | 15.668 |
+|                   | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |   HPPC |    JRE | Koloboke | LibGDX |  Trove |
+|-------------------|-------:|---------:|--------:|------------:|---------:|-------:|-------:|---------:|-------:|-------:|
+| Geomean (lowBits) | 18.397 |   19.466 |  7.972* |      12.913 |   16.549 | 13.206 | 20.959 |   15.448 | 11.380 | 15.668 |
 
 Again, similar patterns for lowBits in writes from reads. Trove performs better with lowBits keys than random keys 
 (thanks to its identity finalizer), and the same for Eclipse (with its first choice identity finalizer).
+
+Once again, LibGDX also has excellent performance through the whole size range.
 
 {{< benchmark-chart benchmark="Map.writeGM" order="highBits" title="Map Write Geometric Mean — highBits keys" >}}
 
 Geomeans across all sizes (lower is better):
 
-|                    | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |    HPPC |    JRE | Koloboke |  Trove |
-|--------------------|-------:|---------:|--------:|------------:|---------:|--------:|-------:|---------:|-------:|
-| Geomean (highBits) | 18.470 |  220.477 | 18.939* |      14.154 |   34.261 | 139.099 | 70.280 |   27.543 | 36.299 |
+|                    | Agrona | AndroidX | Eclipse | FastCollect | Fastutil |    HPPC |    JRE | Koloboke | LibGDX |  Trove |
+|--------------------|-------:|---------:|--------:|------------:|---------:|--------:|-------:|---------:|-------:|-------:|
+| Geomean (highBits) | 18.470 |  220.477 | 18.939* |      14.154 |   34.261 | 139.099 | 70.280 |   27.543 | 12.744 | 36.299 |
 
 And for highBits keys we see the same patterns for AndroidX and HPPC, awful performance, especially at lower sizes. 
 Fastutil shows the same degradation, just not as bad.
@@ -966,9 +1000,9 @@ Since iteration is agnostic to actual key values, it is simply the geometric mea
 
 Geomeans across all sizes (lower is better):
 
-|   Agrona | AndroidX |  Eclipse | FastCollect | Fastutil |     HPPC |      JRE | Koloboke |   Trove |
-|---------:|---------:|---------:|------------:|---------:|---------:|---------:|---------:|--------:|
-| 1180.189 |  394.426 | 1493.984 |    1136.482 |  996.386 | 1910.326 | 1566.672 |  917.517 | 826.078 |
+|   Agrona | AndroidX |  Eclipse | FastCollect | Fastutil |     HPPC |      JRE | Koloboke |   LibGDX |   Trove |
+|---------:|---------:|---------:|------------:|---------:|---------:|---------:|---------:|---------:|--------:|
+| 1180.189 |  394.426 | 1493.984 |    1136.482 |  996.386 | 1910.326 | 1566.672 |  917.517 | 1287.967 | 826.078 |
 
 From roughly ~16K entries onwards, JRE iteration is slower than every other library - a direct consequence of it 
 using more memory. Accessing more memory in a linear fashion takes more time - no two ways about it. Without 
@@ -994,33 +1028,33 @@ exposes hash ordering, but is also now not very cache friendly and thus is slowe
 benchmarked here suffer the same problem, but generally ignore it and allow the user to shoot themselves in the foot 
 if they aren't careful with proper pre-sizing so that iteration is not artificially slowed.
 
-Indeed, FastCollect suffers the same problem as well (to an even greater degree, given that maintaining the Robin 
-Hood invariant requires extra work during insertion), but takes a slightly different approach. Any linear probing 
-approach means we can expect calculable upper bounds on maximum run length for various map sizes (while there are 
-indeed formulas to calculate this - see https://www.cs.tau.ac.il//~zwick/Adv-Alg-2015/Linear-Probing.pdf for more 
-information - I skipped that and simply used Monte Carlo simulations). I.e. given a map with a backing array of 
-length 65536 which is ~83.3% full, we would expect VERY roughly a maximum run length (consecutive non-empty slots) 
-of ~500 at the 99.9th percentile. So if we see a run length > 500 in a map of that size, it's extraordinarily likely
-that something is going drastically wrong. And further, if we're in the accidentally quadratic re-insertion 
-scenario discussed above, we'll likely encounter that warning after only ~500 elements - quite early in the 
-re-insertion! When FastCollect detects these pathologically long run lengths that should never be expected under any 
-normal scenario, it will pre-emptively resize the map larger, with the effect of ameliorating quadratic runtimes. This 
-adds slightly more complex logic to detect run lengths during insertion, but correct branch prediction minimizes the
-cost of this and still allows a fast iteration implementation.
+Indeed, FastCollect and LibGDX suffers the same problem as well. FastCollect takes a slightly different approach to 
+solve the problem, however. Any linear probing approach means we can expect calculable upper bounds on maximum run
+length for various map sizes (while there are indeed formulas to calculate this - 
+see https://www.cs.tau.ac.il//~zwick/Adv-Alg-2015/Linear-Probing.pdf for more information - I skipped that and 
+simply used Monte Carlo simulations). I.e. given a map with a backing array of length 65536 which is ~83.3% full, we 
+would expect VERY roughly a maximum run length (consecutive non-empty slots) of ~500 at the 99.9th percentile. So 
+if we see a run length > 500 in a map of that size, it's extraordinarily likely that something is going drastically 
+wrong. And further, if we're in the accidentally quadratic re-insertion scenario discussed above, we'll likely 
+encounter that warning after only ~500 elements - quite early in the re-insertion! When FastCollect detects these 
+pathologically long run lengths that should never be expected under any normal scenario, it will pre-emptively 
+resize the map larger, with the effect of ameliorating quadratic runtimes. This adds slightly more complex logic to 
+detect run lengths during insertion, but correct branch prediction minimizes the cost of this and still allows a fast 
+iteration implementation.
 
 #### Copy Performance
 
 Here we'll only examine pre-allocated copy performance, as we really discussed all the interesting bits of naive 
-copy performance just now under the iteration section (though feel free to check out naive copy results as well 
-under the [All Results](#all-results) section).
+copy performance just now under the iteration section (though I encourage you to check out the naiveCopy results as 
+well, in particular to observe LibGDX's performance under the [All Results](#all-results) section).
 
 {{< benchmark-chart benchmark="IntMap.preAllocatedCopy" title="Int → Int / preAllocatedCopy" >}}
 
 Geomeans across all sizes (lower is better):
 
-|  Agrona | AndroidX | Eclipse | FastCollect | Fastutil |    HPPC |     JRE | Koloboke |   Trove |
-|--------:|---------:|--------:|------------:|---------:|--------:|--------:|---------:|--------:|
-| 774.117 |  576.580 | 490.935 |      18.716 |  138.692 | 620.683 | 259.533 |  121.097 | 288.608 |
+|  Agrona | AndroidX | Eclipse | FastCollect | Fastutil |    HPPC |     JRE | Koloboke |  LibGDX |   Trove |
+|--------:|---------:|--------:|------------:|---------:|--------:|--------:|---------:|--------:|--------:|
+| 774.117 |  576.580 | 490.935 |      18.716 |  138.692 | 620.683 | 259.533 |  121.097 | 134.853 | 288.608 |
 
 There's perhaps not too much surprising here - copy performance is tied to write performance, except that
 FastCollect is able to substantially outperform all other maps. FastCollect attempts to use direct memcpy whenever
@@ -1150,6 +1184,70 @@ return (int) (h ^ (h >>> 16));  // second fold shifts entropy lower
 HPPC's lack of an additional fold to spread entropy downwards leads to substantially worse performance for Long maps 
 on highBits keys, and this is visible in the final geometric mean results.
 
+#### LibGDX NaiveCopy Performance
+
+LibGDX has excellent all-around performance except in one area, the
+[naive copy benchmark](#int--int--naivecopy--preallocatedcopy). The root cause is LibGDX's hash finalizer (reproduced 
+here):
+
+```java
+return (int)(key * 0x9E3779B97F4A7C15L >>> Integer.countLeadingZeros(size - 1));
+```
+
+To start, this is an especially bad case of
+[accidentally quadratic re-insertion](https://accidentallyquadratic.tumblr.com/post/153545455987/rust-hash-iteration-reinsertion).
+While all the libraries (except JRE and HPPC) under test are vulnerable to this to some degree, it's much, much worse 
+for LibGDX due to the hash finalizer it uses. This hash finalizer ends up taking the top N bits of the Fibonacci
+multiply (even after masking). In contrast, other libraries are taking the bottom N bits (because they use a 
+constant shift, not one based on the current table size).
+
+This matters in the naive copy scenario where we are filling in a very small map from a much larger map, in hash 
+order (because iteration order is the same as hash order). If we're using the bottom N bits, then for the first half 
+of re-insertion things proceed relatively normally, and it's only when we get to the second half of re-insertion 
+that insertions begin to "stack up" and we begin to get quadratic behavior (since growing a table exposes 1 'new' 
+bit from the hash). In contrast, if we're using top N bits, then we begin to encounter quadratic behavior almost 
+immediately on re-insertion, and it affects the entire process. This is perhaps best illustrated with an example.
+
+Let's consider a key with the hash 10100000101101 (16-bits for brevity's sake). What slot does this key live at for 
+various table sizes?
+
+| Table Size | Slot From High-Bits | Slot From Low-Bits |
+|------------|---------------------|--------------------|
+| 16         | 1010 = 10           | 1101 = 13          |
+| 32         | 10100 = 20          | 01101 = 13         |
+| 64         | 101000 = 40         | 101101 = 45        |    
+| 128        | 1010000 = 80        | 0101101 = 45       |
+
+Now let's observe the pattern - for high-bits, slot(n+1) = slot(n)*2 + newbit - each grow refines the same coarse 
+bucket into two finer ones. For low-bits, growing the table only adds a new high bit and the previous slot 
+assignment is either unchanged or shifts by 2^(n-1).
+
+With that in mind, let's look at what happens if we iterate a large table in hash order - we could get multiple keys 
+that all map to the same slot because of hash collisions. What happens when we try to insert them in the smaller 
+table, what slot do they map to in the smaller table? We take 8 keys that all maps to slot 40 (ie a prefix of 101000)
+of a 64-slot table and check what slot they map to in a 16 slot table:
+                                                                                                                                                                                                                                       
+| key | Destination Slot From High-Bits | Destination Slot From Low-Bits |
+|-----|---------------------------------|--------------------------------|
+| 35  | 10                              | 15                             |                                                                                                                                                                                                                                                   
+| 124 | 10                              | 12                             |                                                                                                                                                                                                                                                  
+| 179 | 10                              | 15                             |                                                                                                                                                                                                                                                 
+| 268 | 10                              | 12                             |                                                                                                                                                                                                                                                
+| 357 | 10                              | 9                              |                                                                                                                                                                                                                                               
+| 412 | 10                              | 12                             |                                                                                                                                                                                                                                              
+| 501 | 10                              | 9                              |                                                                                                                                                                                                                                             
+| 556 | 10                              | 12                             |
+
+Those collisions on re-insertion is what leads to awful quadratic runtimes. Interestingly, I ran into the exact same 
+problem while writing the FastCollect library, and this is what inspired thinking about hash bit-reversal as a 
+technique. With bit reversal, you can put the maximum entropy bits into the low positions without needing a size 
+dependent shift, and thus avoiding this problem. As a general purpose library, it didn't feel acceptable for 
+FastCollect to allow such a massive foot-gun for the client, even if it's a rarer code path. That meant accepting 
+slightly worse get/put performance in order to ameliorate the foot-gun. Note that LibGDX is not intended to be a 
+general purpose library, and thus its calculus may be different. One more thing to note however, while this shows up 
+in naive copy scenarios, it's also pretty easy for a malicious client to exploit intentionally... As always, there 
+is a trade-off between performance and security.
+
 ### Final Takeaways
 
 We've confirmed the basics - compared to the JRE HashMap, hashtables specialized for primitives may deliver up to:
@@ -1173,7 +1271,8 @@ In the 2014 benchmarks, HashMap was ~9x (very roughly eyeballed, don't take this
 Koloboke in GetHit scenarios. In today's benchmark, HashMap is only roughly ~2-3x slower! An impressive 
 improvement over the years. We might expect efforts like
 [Compressed Object Headers](https://openjdk.org/projects/lilliput/) (available since Java 24-25, but not in 21 
-on which benchmarking was performed) to further reduce this distance.
+on which benchmarking was performed) to further reduce this distance (primarily for Double/Long keys however, since 
+for 4 byte values, padding will offset any header compression gains).
 
 ---
 
@@ -1265,6 +1364,22 @@ more due to small differences in implementation rather than anything algorithmic
 
 ---
 
+#### LibGDX
+
+LibGDX uses classical Fibonacci hashing to achieve some of the fastest results in most categories, but collapses to 
+pathologically quadratic runtimes on naiveCopy scenarios. Whether this is a blocker depends a bit on your point of 
+view - naive copy scenarios are generally easy to avoid if you appropriately pre-size maps. However, the library 
+cannot enforce this, it's up to the client, so the question becomes whether it is acceptable for a client to be able
+to shoot itself in the foot if they don't pre-size appropriately when required. It could also be considered a 
+security flaw, in that a malicious attacker can easily trigger a CPU DoS attack if it has control of the hashtable. 
+As previously mentioned however, none of these libraries other than the JRE HashMap are secure in that fashion - 
+it's just that LibGDX's implementation allows much worse DoSes.
+
+On the other hand, LibGDX may be a good example of proving out my hypothesis about simple linear probing out-performing 
+Robin Hood hashing in the end. It's just a question of whether a workable hash function can be found.
+
+---
+
 #### Trove
 
 The only prime-sized table here - it's good to see and evaluate a different approach, but overall it couldn't 
@@ -1279,9 +1394,10 @@ https://doi.org/10.1145/3030207.3030221
 
 ---
 
-In the end, performance across all these libraries is respectable. The larger benefit is memory savings - the
-secondary benefit is CPU savings. And while it's quite entertaining to squeeze every bit of performance possible out of
-these tables, the vast majority of code written in the JVM ecosystem is unlikely to care.
+In the end, performance across all these libraries is respectable (except perhaps Trove, which often performs worse 
+than the standard JRE HashMap). The larger benefit is memory savings - the secondary benefit is CPU savings. And 
+while it's quite entertaining to squeeze every bit of performance possible out of these tables, the vast majority of 
+code written in the JVM ecosystem is unlikely to care.
 
 ## All Results
 
